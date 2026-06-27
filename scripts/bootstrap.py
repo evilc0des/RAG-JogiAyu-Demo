@@ -20,6 +20,8 @@ def main():
     parser.add_argument("--qdrant-url", default=os.environ.get("QDRANT_URL", "http://localhost:6333"))
     parser.add_argument("--qdrant-api-key", default=os.environ.get("QDRANT_API_KEY") or None)
     parser.add_argument("--db", default="data/chunks.db")
+    parser.add_argument("--sparse-fts", default="data/sparse_fts.db",
+                        help="Path to FTS5 sparse index (default: data/sparse_fts.db)")
     parser.add_argument("--sparse-shards", default="data/sparse_shards")
     parser.add_argument("--snapshot", default="data/dense_index.snapshot")
     parser.add_argument("--token", default=os.environ.get("HF_TOKEN"),
@@ -40,16 +42,18 @@ def main():
         print("WARNING: HF_TOKEN not set. Attempting anonymous download (may fail for private repos).")
 
     db_path = Path(args.db)
+    fts_path = Path(args.sparse_fts)
     sparse_dir = Path(args.sparse_shards)
     snapshot_path = Path(args.snapshot)
 
     # --- Step 1: Download data files from HF ---
 
+    has_sparse = (
+        fts_path.exists()
+        or (sparse_dir.exists() and list(sparse_dir.glob("shard_*.pkl")))
+    )
     needs_download = args.force or not (
-        db_path.exists()
-        and sparse_dir.exists()
-        and list(sparse_dir.glob("shard_*.pkl"))
-        and snapshot_path.exists()
+        db_path.exists() and has_sparse and snapshot_path.exists()
     )
 
     if needs_download:
@@ -66,15 +70,21 @@ def main():
 
         has_chunks = "chunks.db" in repo_files
         has_snapshot = "dense_index.snapshot" in repo_files
+        has_fts = "sparse_fts.db" in repo_files
         sparse_files = [f for f in repo_files
                         if f.startswith("sparse_shards/") and f.endswith(".pkl")]
 
         print(f"  chunks.db: {'yes' if has_chunks else 'MISSING'}")
         print(f"  dense_index.snapshot: {'yes' if has_snapshot else 'MISSING'}")
-        print(f"  sparse shards: {len(sparse_files)} files")
+        print(f"  sparse_fts.db: {'yes' if has_fts else 'no'}")
+        print(f"  sparse shards (legacy): {len(sparse_files)} files")
 
         if not has_chunks:
             print("ERROR: chunks.db not found in repo.")
+            sys.exit(1)
+
+        if not has_fts and not sparse_files:
+            print("ERROR: No sparse index found in repo (neither sparse_fts.db nor sparse_shards/).")
             sys.exit(1)
 
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,9 +95,17 @@ def main():
         )
         print(f"  Saved to {db_path}")
 
-        if sparse_files:
+        # Prefer FTS5 (single file, low RAM) over legacy shards
+        if has_fts:
+            print("Downloading sparse_fts.db ...")
+            hf_hub_download(
+                repo_id=repo_id, filename="sparse_fts.db", repo_type="dataset",
+                token=token, local_dir="data", local_dir_use_symlinks=False,
+            )
+            print(f"  Saved to {fts_path}")
+        elif sparse_files:
             sparse_dir.mkdir(parents=True, exist_ok=True)
-            print(f"Downloading {len(sparse_files)} sparse shards ...")
+            print(f"Downloading {len(sparse_files)} sparse shards (legacy) ...")
             for i, sf in enumerate(sparse_files):
                 hf_hub_download(
                     repo_id=repo_id, filename=sf, repo_type="dataset",
@@ -96,8 +114,6 @@ def main():
                 if (i + 1) % 10 == 0:
                     print(f"  {i + 1}/{len(sparse_files)} shards downloaded")
             print(f"  {len(sparse_files)} sparse shards saved to {sparse_dir}")
-        else:
-            print("WARNING: No sparse shards found in repo.")
 
         if has_snapshot:
             print("Downloading dense_index.snapshot ...")

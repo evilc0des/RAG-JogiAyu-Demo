@@ -35,15 +35,18 @@ fi
 echo "Starting Qdrant..."
 /usr/local/bin/qdrant $SNAPSHOT_ARG &
 
-echo "Waiting for Qdrant health..."
-for i in $(seq 1 60); do
+echo "Waiting for Qdrant health (large collections may take a few minutes)..."
+for i in $(seq 1 300); do
     if curl -sf http://localhost:6333/ > /dev/null 2>&1; then
-        echo "Qdrant is healthy."
+        echo "Qdrant is healthy. (ready in ${i}s)"
         break
     fi
-    if [ "$i" -eq 60 ]; then
-        echo "ERROR: Qdrant failed to start within 60s"
+    if [ "$i" -eq 300 ]; then
+        echo "ERROR: Qdrant failed to start within 300s"
         exit 1
+    fi
+    if [ $((i % 15)) -eq 0 ]; then
+        echo "  Still waiting for Qdrant... (${i}s elapsed)"
     fi
     sleep 1
 done

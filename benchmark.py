@@ -211,20 +211,27 @@ class BenchmarkRunner:
         if self._db is not None:
             return
         from indexing import SparseRetriever, DenseRetriever
+        from sparse_fts import SparseFTS5Retriever
 
         self._db = ChunkStoreDB(self.config["db_path"])
 
+        fts_path = self.config.get("sparse_fts_path", "data/sparse_fts.db")
         sparse_shards = Path(self.config.get("sparse_shards_dir", "data/sparse_shards"))
         sparse_index = Path(self.config.get("sparse_index_path", "data/sparse_index.pkl"))
 
-        if sparse_shards.exists() and list(sparse_shards.glob("shard_*.pkl")):
+        # Prefer FTS5 (disk-backed, near-zero RAM)
+        fts = SparseFTS5Retriever.load(fts_path)
+        if fts is not None:
+            self._sparse = fts
+            print(f"Sparse: FTS5 ({fts.count()} children, disk-backed)")
+        elif sparse_shards.exists() and list(sparse_shards.glob("shard_*.pkl")):
             self._sparse = SparseRetriever.load_sharded(str(sparse_shards))
-            print(f"Sparse: sharded ({len(self._sparse.shards)} shards)")
+            print(f"Sparse: sharded ({len(self._sparse.shards)} shards) [WARNING: high RAM]")
         elif sparse_index.exists():
             self._sparse = SparseRetriever.load(str(sparse_index))
             n_children = len(self._sparse.chunk_store)
             db_total = self._db.count_children("child")
-            print(f"Sparse: single index ({n_children} children, DB has {db_total})")
+            print(f"Sparse: single index ({n_children} children, DB has {db_total}) [WARNING: high RAM]")
             if n_children < 1000 and db_total > 1000:
                 print("  WARNING: sparse index has very few children vs DB. "
                       "Build sharded index for accurate benchmarks.")
@@ -625,45 +632,37 @@ class BenchmarkRunner:
             _cleanup_path(temp_db)
 
     def benchmark_sparse_indexing(self):
-        shard_size = self.config.get("sparse_shard_size", 50000)
         temp_db = Path("data/benchmark_chunks.db")
-        temp_dir = Path("data/benchmark_sparse_shards")
-        print(f"\n--- Sparse Indexing Benchmark (shard_size={shard_size}) ---")
+        print(f"\n--- Sparse Indexing Benchmark (FTS5) ---")
 
-        from indexing import build_sparse_indexes_from_db
+        from sparse_fts import SparseFTS5Retriever
 
         if not temp_db.exists():
             print("  SKIPPED: temp DB not found (run chunking first)")
             self.results["sparse_indexing"] = {"error": "temp DB not found"}
             return
 
-        if temp_dir.exists():
-            shutil.rmtree(str(temp_dir))
-        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_fts = Path("data/benchmark_sparse_fts.db")
+        _cleanup_path(temp_fts)
 
         t0 = time.perf_counter()
-        build_sparse_indexes_from_db(str(temp_db), str(temp_dir), shard_size=shard_size)
+        fts = SparseFTS5Retriever(str(temp_fts))
+        fts.build_from_db(str(temp_db))
         total_s = time.perf_counter() - t0
 
-        shard_files = sorted(temp_dir.glob("shard_*.pkl"))
-        import pickle
-        total_children = 0
-        for sf in shard_files:
-            with open(sf, "rb") as f:
-                data = pickle.load(f)
-            total_children += len(data.get("chunk_store", []))
+        total_children = fts.count()
+        fts.close()
 
         self.results["sparse_indexing"] = {
             "total_time_s": round(total_s, 2),
-            "num_shards": len(shard_files),
+            "backend": "fts5",
             "total_children": total_children,
             "children_per_sec": round(total_children / total_s, 1) if total_s > 0 else 0,
-            "shard_size": shard_size,
         }
         self._print_batch("sparse_indexing")
 
         if not self.config.get("keep_temp"):
-            shutil.rmtree(str(temp_dir), ignore_errors=True)
+            _cleanup_path(temp_fts)
 
     def benchmark_dense_indexing(self):
         batch_size = self.config.get("dense_batch_size", 1000)
@@ -853,6 +852,8 @@ def main():
     parser.add_argument("--output", default=None)
     parser.add_argument("--query-cache", default="data/benchmark_queries.json")
     parser.add_argument("--db-path", default="data/chunks.db")
+    parser.add_argument("--sparse-fts", default="data/sparse_fts.db",
+                        help="Path to FTS5 sparse index (default: data/sparse_fts.db)")
     parser.add_argument("--sparse-index-path", default="data/sparse_index.pkl")
     parser.add_argument("--sparse-shards-dir", default="data/sparse_shards")
     parser.add_argument("--dense-path", default="data/qdrant")
@@ -889,6 +890,7 @@ def main():
         "gen_model": args.gen_model,
         "gen_temperature": args.gen_temperature,
         "db_path": args.db_path,
+        "sparse_fts_path": args.sparse_fts,
         "sparse_index_path": args.sparse_index_path,
         "sparse_shards_dir": args.sparse_shards_dir,
         "dense_path": args.dense_path,

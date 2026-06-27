@@ -22,7 +22,10 @@ def main():
     parser.add_argument("--qdrant-url", default=os.environ.get("QDRANT_URL", "http://localhost:6333"))
     parser.add_argument("--qdrant-api-key", default=os.environ.get("QDRANT_API_KEY") or None)
     parser.add_argument("--db", default="data/chunks.db")
-    parser.add_argument("--sparse-shards", default="data/sparse_shards")
+    parser.add_argument("--sparse-fts", default="data/sparse_fts.db",
+                        help="Path to FTS5 sparse index (default: data/sparse_fts.db)")
+    parser.add_argument("--sparse-shards", default="data/sparse_shards",
+                        help="Path to legacy BM25 shards dir (fallback if no FTS5)")
     parser.add_argument("--token", default=os.environ.get("HF_TOKEN"),
                         help="HuggingFace API token (or set HF_TOKEN env var)")
     args = parser.parse_args()
@@ -38,15 +41,18 @@ def main():
         sys.exit(1)
 
     db_path = Path(args.db)
+    fts_path = Path(args.sparse_fts)
     sparse_dir = Path(args.sparse_shards)
 
     if not db_path.exists():
         print(f"ERROR: chunks.db not found at {db_path}. Run index_data.py first.")
         sys.exit(1)
 
-    shard_files = sorted(sparse_dir.glob("shard_*.pkl"))
-    if not shard_files:
-        print(f"ERROR: no sparse shards found in {sparse_dir}. Run index_data.py first.")
+    use_fts = fts_path.exists()
+    shard_files = sorted(sparse_dir.glob("shard_*.pkl")) if not use_fts else []
+    if not use_fts and not shard_files:
+        print(f"ERROR: no sparse index found. Expected {fts_path} or shards in {sparse_dir}.")
+        print("Run index_data.py first.")
         sys.exit(1)
 
     from indexing import create_qdrant_snapshot, download_qdrant_snapshot
@@ -85,16 +91,25 @@ def main():
             repo_type="dataset",
         )
 
-        print(f"Uploading {len(shard_files)} sparse shards to {repo_id}/sparse_shards/ ...")
-        for i, sf in enumerate(shard_files):
+        if use_fts:
+            print(f"Uploading sparse_fts.db ({fts_path.stat().st_size / 1024 / 1024:.1f} MB) to {repo_id} ...")
             api.upload_file(
-                path_or_fileobj=str(sf),
-                path_in_repo=f"sparse_shards/{sf.name}",
+                path_or_fileobj=str(fts_path),
+                path_in_repo="sparse_fts.db",
                 repo_id=repo_id,
                 repo_type="dataset",
             )
-            if (i + 1) % 10 == 0:
-                print(f"  {i + 1}/{len(shard_files)} shards uploaded")
+        else:
+            print(f"Uploading {len(shard_files)} sparse shards to {repo_id}/sparse_shards/ ...")
+            for i, sf in enumerate(shard_files):
+                api.upload_file(
+                    path_or_fileobj=str(sf),
+                    path_in_repo=f"sparse_shards/{sf.name}",
+                    repo_id=repo_id,
+                    repo_type="dataset",
+                )
+                if (i + 1) % 10 == 0:
+                    print(f"  {i + 1}/{len(shard_files)} shards uploaded")
 
         print(f"Uploading Qdrant snapshot to {repo_id} ...")
         api.upload_file(
@@ -104,8 +119,9 @@ def main():
             repo_type="dataset",
         )
 
+        sparse_desc = "sparse_fts.db" if use_fts else f"sparse_shards/ ({len(shard_files)} shards)"
         print(f"\nPackage uploaded successfully to {repo_id}")
-        print(f"  Files: chunks.db, sparse_shards/ ({len(shard_files)} shards), dense_index.snapshot")
+        print(f"  Files: chunks.db, {sparse_desc}, dense_index.snapshot")
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

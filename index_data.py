@@ -25,7 +25,6 @@ def _index_progress(event, *args):
 
 
 def main():
-    from datasets import load_dataset
     from indexing import build_sparse_indexes_from_db, build_dense_index_from_db
     from sparse_fts import SparseFTS5Retriever
 
@@ -38,6 +37,8 @@ def main():
                         help=f"Number of parallel chunking workers (default: {os.cpu_count()})")
     parser.add_argument("--rebuild", action="store_true",
                         help="Delete existing data and re-index from scratch (ignores resume state)")
+    parser.add_argument("--skip-chunking", action="store_true",
+                        help="Skip chunking step (use when chunks.db is already populated)")
     parser.add_argument("--legacy-bm25", action="store_true",
                         help="Build old-style rank_bm25 pickle shards instead of FTS5 (high RAM usage)")
     args = parser.parse_args()
@@ -75,18 +76,23 @@ def main():
 
     Path(SPARSE_SHARDS_DIR).mkdir(parents=True, exist_ok=True)
 
-    ds = load_dataset("facebook/kilt_wikipedia", split="full", streaming=True)
     db = ChunkStoreDB(DB_PATH)
-
-    last_child_id = db.get_last_chunk_id("child")
-    last_section_id = db.get_last_chunk_id("section")
-    last_page_id = db.get_last_chunk_id("page")
     page_count = db.count_children("page")
 
-    if page_count >= max_pages:
+    if args.skip_chunking:
+        print(f"Skipping chunking (--skip-chunking). chunks.db has {page_count} pages.")
+        db.close()
+    elif page_count >= max_pages:
         print(f"Already indexed {page_count} pages (target: {max_pages}). Skipping chunking.")
         db.close()
     else:
+        from datasets import load_dataset
+        ds = load_dataset("facebook/kilt_wikipedia", split="full", streaming=True)
+
+        last_child_id = db.get_last_chunk_id("child")
+        last_section_id = db.get_last_chunk_id("section")
+        last_page_id = db.get_last_chunk_id("page")
+
         if page_count > 0:
             last_doc_id = db.get_last_page_doc_id()
             print(f"Resuming from page {page_count} (last doc_id={last_doc_id}). "
