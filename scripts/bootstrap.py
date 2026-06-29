@@ -1,5 +1,8 @@
 import argparse
+import hashlib
+import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -7,6 +10,60 @@ from dotenv import load_dotenv
 
 env_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(env_path, override=True)
+
+
+def _download_sharded_file(repo_id, filename, shard_dir, local_path, token, repo_files, tmp_root):
+    manifest_key = f"{shard_dir}/{filename}.manifest.json"
+    if manifest_key not in repo_files:
+        return False
+
+    from huggingface_hub import hf_hub_download
+
+    print(f"Downloading {filename} manifest ...")
+    hf_hub_download(
+        repo_id=repo_id, filename=manifest_key, repo_type="dataset",
+        token=token, local_dir="data", local_dir_use_symlinks=False,
+    )
+    manifest_path = Path("data") / manifest_key
+    manifest = json.loads(manifest_path.read_text())
+    manifest_path.unlink()
+
+    part_dir = Path("data") / shard_dir
+    tmpdir = tmp_root / f"shard_dl_{filename}"
+    tmpdir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        sha = hashlib.sha256()
+        print(f"Downloading and reassembling {len(manifest['parts'])} shards for {filename} ...")
+        with open(local_path, "wb") as out:
+            for i, part_name in enumerate(manifest["parts"]):
+                part_remote = f"{shard_dir}/{part_name}"
+                hf_hub_download(
+                    repo_id=repo_id, filename=part_remote, repo_type="dataset",
+                    token=token, local_dir=str(tmpdir), local_dir_use_symlinks=False,
+                )
+                part_path = tmpdir / part_remote
+                data = part_path.read_bytes()
+                out.write(data)
+                sha.update(data)
+                part_path.unlink()
+                if (i + 1) % 5 == 0 or i == len(manifest["parts"]) - 1:
+                    print(f"  {i + 1}/{len(manifest['parts'])} shards")
+
+        digest = sha.hexdigest()
+        if digest != manifest["sha256"]:
+            local_path.unlink(missing_ok=True)
+            print(f"ERROR: SHA256 mismatch for {filename} after reassembly.")
+            print(f"  Expected: {manifest['sha256']}")
+            print(f"  Got:      {digest}")
+            sys.exit(1)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        shutil.rmtree(part_dir, ignore_errors=True)
+
+    print(f"  Reassembled {filename} ({local_path.stat().st_size / 1024 / 1024:.1f} MB) from {len(manifest['parts'])} parts")
+    return True
 
 
 def main():
@@ -30,7 +87,12 @@ def main():
                         help="Re-download and re-import even if data exists")
     parser.add_argument("--download-only", action="store_true",
                         help="Download data files but skip Qdrant snapshot import")
+    parser.add_argument("--tmp-dir", default="data/tmp",
+                        help="Directory for temp files during shard download (default: data/tmp)")
     args = parser.parse_args()
+
+    tmp_root = Path(args.tmp_dir)
+    tmp_root.mkdir(parents=True, exist_ok=True)
 
     repo_id = args.repo
     if not repo_id:
@@ -69,34 +131,43 @@ def main():
         print(f"  Found {len(repo_files)} files in repo")
 
         has_chunks = "chunks.db" in repo_files
+        has_chunks_sharded = "chunks_shards/chunks.db.manifest.json" in repo_files
         has_snapshot = "dense_index.snapshot" in repo_files
+        has_snapshot_sharded = "dense_index_shards/dense_index.snapshot.manifest.json" in repo_files
         has_fts = "sparse_fts.db" in repo_files
+        has_fts_sharded = "sparse_fts_shards/sparse_fts.db.manifest.json" in repo_files
         sparse_files = [f for f in repo_files
                         if f.startswith("sparse_shards/") and f.endswith(".pkl")]
 
-        print(f"  chunks.db: {'yes' if has_chunks else 'MISSING'}")
-        print(f"  dense_index.snapshot: {'yes' if has_snapshot else 'MISSING'}")
-        print(f"  sparse_fts.db: {'yes' if has_fts else 'no'}")
+        print(f"  chunks.db: {'sharded' if has_chunks_sharded else 'yes' if has_chunks else 'MISSING'}")
+        print(f"  dense_index.snapshot: {'sharded' if has_snapshot_sharded else 'yes' if has_snapshot else 'MISSING'}")
+        print(f"  sparse_fts.db: {'sharded' if has_fts_sharded else 'yes' if has_fts else 'no'}")
         print(f"  sparse shards (legacy): {len(sparse_files)} files")
 
-        if not has_chunks:
+        if not has_chunks and not has_chunks_sharded:
             print("ERROR: chunks.db not found in repo.")
             sys.exit(1)
 
-        if not has_fts and not sparse_files:
+        if not has_fts and not has_fts_sharded and not sparse_files:
             print("ERROR: No sparse index found in repo (neither sparse_fts.db nor sparse_shards/).")
             sys.exit(1)
 
+        # Download chunks.db (sharded or single file)
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        print("Downloading chunks.db ...")
-        hf_hub_download(
-            repo_id=repo_id, filename="chunks.db", repo_type="dataset",
-            token=token, local_dir="data", local_dir_use_symlinks=False,
-        )
-        print(f"  Saved to {db_path}")
+        if has_chunks_sharded:
+            _download_sharded_file(repo_id, "chunks.db", "chunks_shards", db_path, token, repo_files, tmp_root)
+        else:
+            print("Downloading chunks.db ...")
+            hf_hub_download(
+                repo_id=repo_id, filename="chunks.db", repo_type="dataset",
+                token=token, local_dir="data", local_dir_use_symlinks=False,
+            )
+            print(f"  Saved to {db_path}")
 
-        # Prefer FTS5 (single file, low RAM) over legacy shards
-        if has_fts:
+        # Download sparse index (FTS5 preferred over legacy shards)
+        if has_fts_sharded:
+            _download_sharded_file(repo_id, "sparse_fts.db", "sparse_fts_shards", fts_path, token, repo_files, tmp_root)
+        elif has_fts:
             print("Downloading sparse_fts.db ...")
             hf_hub_download(
                 repo_id=repo_id, filename="sparse_fts.db", repo_type="dataset",
@@ -115,7 +186,10 @@ def main():
                     print(f"  {i + 1}/{len(sparse_files)} shards downloaded")
             print(f"  {len(sparse_files)} sparse shards saved to {sparse_dir}")
 
-        if has_snapshot:
+        # Download dense index snapshot (sharded or single file)
+        if has_snapshot_sharded:
+            _download_sharded_file(repo_id, "dense_index.snapshot", "dense_index_shards", snapshot_path, token, repo_files, tmp_root)
+        elif has_snapshot:
             print("Downloading dense_index.snapshot ...")
             snapshot_path.parent.mkdir(parents=True, exist_ok=True)
             hf_hub_download(

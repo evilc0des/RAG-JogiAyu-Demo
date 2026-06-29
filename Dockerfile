@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     zlib1g \
-    libcudnn8 \
+    libcudnn9-cuda-12 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -L -o /tmp/qdrant.tar.gz \

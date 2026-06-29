@@ -1,6 +1,16 @@
 #!/bin/bash
 set -e
 
+# --- Raise OS limits for Qdrant + RocksDB with large collections ---
+# RocksDB opens many SST files; default limits cause "IO error: While open
+# a file for random read" on the second query with millions of vectors.
+ulimit -n 65536 2>/dev/null || echo "WARNING: could not raise open-file limit (ulimit -n)"
+if [ -w /proc/sys/vm/max_map_count ]; then
+    echo 262144 > /proc/sys/vm/max_map_count
+else
+    echo "NOTE: cannot set vm.max_map_count (not privileged). If Qdrant crashes, run the container with --privileged or set on the host."
+fi
+
 if [ ! -L /app/data ]; then
     ln -s /data /app/data
 fi
@@ -33,7 +43,7 @@ if [ "$MODE" = "serve" ]; then
 fi
 
 echo "Starting Qdrant..."
-/usr/local/bin/qdrant $SNAPSHOT_ARG &
+QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS=2 /usr/local/bin/qdrant $SNAPSHOT_ARG &
 
 echo "Waiting for Qdrant health (large collections may take a few minutes)..."
 for i in $(seq 1 300); do
