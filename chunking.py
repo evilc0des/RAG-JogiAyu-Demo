@@ -194,7 +194,7 @@ def chunk_page(page_data):
             )
             if is_new:
                 section_chunk = create_new_chunk(
-                    "section", last_chunk["text"],
+                    "section", "",
                     doc_id=s["wikipedia_id"],
                     section_path=last_chunk["section_path"],
                     title=s["wikipedia_title"],
@@ -206,11 +206,15 @@ def chunk_page(page_data):
                     parent_id=None,
                 )
                 sections.append(section_chunk)
-            else:
-                sections[-1]["text"] += f"\n{last_chunk['text']}"
-                sections[-1]["paragraph_end"] = idx
+            sections[-1]["paragraph_end"] = idx
             last_chunk["parent_id"] = sections[-1]["chunk_id"]
-            sections[-1]["children_ids"].append(last_chunk["chunk_id"])
+            if last_chunk["chunk_id"] not in sections[-1]["children_ids"]:
+                sections[-1]["children_ids"].append(last_chunk["chunk_id"])
+
+    chunk_map = {c["chunk_id"]: c for c in chunks}
+    for sc in sections:
+        child_texts = [chunk_map[cid]["text"] for cid in sc["children_ids"] if cid in chunk_map]
+        sc["text"] = "\n".join(child_texts)
 
     page_chunk = create_new_chunk(
         "page", "\n".join(s["text"] for s in sections),

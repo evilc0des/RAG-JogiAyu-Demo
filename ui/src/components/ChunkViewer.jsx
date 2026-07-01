@@ -41,8 +41,37 @@ export default function ChunkViewer({ chunk, onClose }) {
 
   if (!chunk) return null;
 
+  const deduplicateCumulativeText = (text) => {
+    const lines = text.split('\n');
+    const n = lines.length;
+    const keep = new Array(n).fill(true);
+
+    for (let i = 0; i < n; i++) {
+      for (let blockLen = 1; i + blockLen * 2 <= n; blockLen++) {
+        let match = true;
+        for (let j = 0; j < blockLen; j++) {
+          if (lines[i + j] !== lines[i + blockLen + j]) {
+            match = false;
+            break;
+          }
+        }
+        if (match) {
+          if (i + blockLen * 2 < n) {
+            for (let j = 0; j < blockLen; j++) {
+              keep[i + j] = false;
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    return lines.filter((_, idx) => keep[idx]).join('\n');
+  };
+
   const renderHighlightedText = () => {
-    const textToSearch = pageChunk?.text || "";
+    const rawText = pageChunk?.text || "";
+    const textToSearch = deduplicateCumulativeText(rawText);
     if (!pageChunk || chunk.chunk_id === pageChunk.chunk_id || !chunk.text) {
       return textToSearch;
     }
