@@ -12,7 +12,8 @@ FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
-    QDRANT_URL=http://localhost:6333
+    QDRANT_URL=http://localhost:6333 \
+    HF_HOME=/app/hf_cache
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 \
@@ -38,6 +39,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         torch==2.5.1 \
         -r requirements.txt && \
     pip install --force-reinstall --no-deps onnxruntime-gpu==1.21.0
+
+# Pre-download the embedding model at build time so startup is instant
+RUN python3 -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5')"
 
 COPY *.py /app/
 COPY scripts/ /app/scripts/

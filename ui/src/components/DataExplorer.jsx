@@ -1,9 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import axios from 'axios';
+import api from '../api';
 import { ChevronRight, ChevronDown, FileText, Type } from 'lucide-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-
-const API_BASE = 'http://localhost:8000/api';
 
 function ChunkNode({ chunk, onSelect, level = 0, onResize }) {
   const [expanded, setExpanded] = useState(false);
@@ -16,7 +14,7 @@ function ChunkNode({ chunk, onSelect, level = 0, onResize }) {
     if (!expanded && hasChildren && !children) {
       setLoading(true);
       try {
-        const res = await axios.get(`${API_BASE}/chunks/${chunk.chunk_id}`);
+        const res = await api.get(`/chunks/${chunk.chunk_id}`);
         setChildren(res.data.children);
       } catch (err) {
         console.error("Failed to load children", err);
@@ -90,7 +88,7 @@ export default function DataExplorer({ onSelectChunk }) {
     setFetchingRanges(prev => new Set(prev).add(pageIdx));
     const offset = pageIdx * limit;
     try {
-      const res = await axios.get(`${API_BASE}/chunks?limit=${limit}&offset=${offset}`);
+      const res = await api.get(`/chunks?limit=${limit}&offset=${offset}`);
       setTotal(res.data.total);
       setChunksMap(prev => {
         const next = { ...prev };

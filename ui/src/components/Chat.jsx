@@ -1,9 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
-import axios from 'axios';
+import api from '../api';
 import ReactMarkdown from 'react-markdown';
 import { Send, Bot, User, AlertCircle, Info } from 'lucide-react';
-
-const API_BASE = 'http://localhost:8000';
 
 export default function Chat({ onSelectChunk }) {
   const [messages, setMessages] = useState([
@@ -37,7 +35,7 @@ export default function Chat({ onSelectChunk }) {
     setLoading(true);
 
     try {
-      const res = await axios.post(`${API_BASE}/query`, {
+      const res = await api.post(`/query`, {
         query: userMessage.content,
         chat_history: chatHistory
       });

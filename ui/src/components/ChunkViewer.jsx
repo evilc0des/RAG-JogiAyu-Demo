@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import api from '../api';
 import { X, FileText, Database, Type, ListTree } from 'lucide-react';
 
 export default function ChunkViewer({ chunk, onClose }) {
@@ -12,7 +12,7 @@ export default function ChunkViewer({ chunk, onClose }) {
       setPageChunk(chunk);
     } else if (chunk.doc_id) {
       setLoadingPage(true);
-      axios.get(`http://localhost:8000/api/pages/${chunk.doc_id}`)
+      api.get(`/pages/${chunk.doc_id}`)
         .then(res => {
           setPageChunk(res.data.page);
           setLoadingPage(false);
