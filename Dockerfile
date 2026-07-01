@@ -41,7 +41,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --force-reinstall --no-deps onnxruntime-gpu==1.21.0
 
 # Pre-download the embedding model at build time so startup is instant
-RUN python3 -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5')"
+# Use huggingface_hub directly to avoid loading onnxruntime-gpu (no GPU during build)
+RUN python3 -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('BAAI/bge-small-en-v1.5')"
 
 COPY *.py /app/
 COPY scripts/ /app/scripts/
