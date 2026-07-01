@@ -1,3 +1,12 @@
+# Stage 1: Build the UI
+FROM node:20 AS ui-builder
+WORKDIR /app/ui
+COPY ui/package*.json ./
+RUN npm ci
+COPY ui/ ./
+RUN npm run build
+
+# Stage 2: Python Backend
 FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -32,6 +41,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 COPY *.py /app/
 COPY scripts/ /app/scripts/
+COPY --from=ui-builder /app/ui/dist /app/ui/dist
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

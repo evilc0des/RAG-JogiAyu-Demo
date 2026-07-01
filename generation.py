@@ -22,7 +22,10 @@ class AnswerGenerator:
         self.api_base = config.get("api_base") or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1"
         self.extra_headers = config.get("headers") or {}
 
-    def generate(self, query_text, context_blocks):
+    def generate(self, query_text, context_blocks, chat_history=None):
+        if chat_history is None:
+            chat_history = []
+            
         if not context_blocks:
             return {
                 "answer_text": None,
@@ -33,10 +36,14 @@ class AnswerGenerator:
             }
 
         context_str = self._format_context(context_blocks)
-        messages = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": f"Context blocks:\n\n{context_str}\n\nQuestion: {query_text}"},
-        ]
+        messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+        
+        # Append chat history
+        for msg in chat_history[-5:]: # Keep last 5 messages for context size
+            messages.append({"role": msg["role"], "content": msg["content"]})
+            
+        # Append the new query with context
+        messages.append({"role": "user", "content": f"Context blocks:\n\n{context_str}\n\nQuestion: {query_text}"})
 
         url = f"{self.api_base.rstrip('/')}/chat/completions"
         headers = {"Content-Type": "application/json"}

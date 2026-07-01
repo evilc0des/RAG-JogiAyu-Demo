@@ -3,6 +3,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 logger = logging.getLogger("rag-api")
@@ -66,11 +68,25 @@ async def lifespan(app):
 
 app = FastAPI(title="RAG Demo API", lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class Message(BaseModel):
+    role: str
+    content: str
+
 
 class QueryRequest(BaseModel):
     query: str
     model: str | None = "gemma-4-31B-it"
     temperature: float | None = 0.2
+    chat_history: list[Message] = []
 
 
 class Citation(BaseModel):
@@ -131,7 +147,8 @@ def query(request: QueryRequest):
             "model": request.model,
             "temperature": request.temperature,
         })
-        answer = generator.generate(request.query, context_blocks)
+        history_dicts = [{"role": m.role, "content": m.content} for m in request.chat_history]
+        answer = generator.generate(request.query, context_blocks, chat_history=history_dicts)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"LLM generation failed: {e}")
 
@@ -164,4 +181,59 @@ def query(request: QueryRequest):
         reason=answer.get("reason"),
         sections=sections,
     )
+
+
+_page_count_cache = None
+
+@app.get("/api/chunks")
+def get_root_chunks(limit: int = 50, offset: int = 0):
+    global _page_count_cache
+    if _db is None:
+        raise HTTPException(status_code=503, detail="Indices still loading")
+    
+    if _page_count_cache is None:
+        _page_count_cache = _db.count_children("page")
+        
+    chunks = _db.get_children_by_type("page", limit=limit, offset=offset)
+    return {"chunks": chunks, "total": _page_count_cache}
+
+
+@app.get("/api/chunks/{chunk_id}")
+def get_chunk(chunk_id: str):
+    if _db is None:
+        raise HTTPException(status_code=503, detail="Indices still loading")
+    
+    chunk = _db.get_chunk(chunk_id)
+    if not chunk:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+    
+    # Resolve children
+    children = []
+    for child_id in chunk.get("children_ids", []):
+        child = _db.get_chunk(child_id)
+        if child:
+            children.append(child)
+            
+    return {"chunk": chunk, "children": children}
+
+
+@app.get("/api/pages/{doc_id}")
+def get_page(doc_id: str):
+    if _db is None:
+        raise HTTPException(status_code=503, detail="Indices still loading")
+    
+    # Fetch the 'page' chunk for this doc_id
+    page_chunks = _db.get_chunks_by_doc_id(doc_id, chunk_type="page")
+    if not page_chunks:
+        raise HTTPException(status_code=404, detail="Page not found for this document")
+    
+    return {"page": page_chunks[0]}
+
+
+# Mount the React UI static files
+import os
+if os.path.exists("ui/dist"):
+    app.mount("/", StaticFiles(directory="ui/dist", html=True), name="ui")
+else:
+    logger.warning("ui/dist not found. The web GUI will not be served.")
 

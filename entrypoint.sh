@@ -67,7 +67,7 @@ case "$MODE" in
         exec python3 index_data.py "$@"
         ;;
     serve)
-        echo "Starting API server on port 8080..."
+        echo "Starting API and Web UI server on port 8080..."
         exec python3 -m uvicorn api:app --host 0.0.0.0 --port 8080
         ;;
     *)
