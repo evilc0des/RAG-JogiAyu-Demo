@@ -22,6 +22,25 @@ class AnswerGenerator:
         self.api_base = config.get("api_base") or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1"
         self.extra_headers = config.get("headers") or {}
 
+    def _call_llm(self, messages):
+        url = f"{self.api_base.rstrip('/')}/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        headers.update(self.extra_headers)
+
+        body = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+
+        resp = requests.post(url, headers=headers, json=body, timeout=120)
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"] or ""
+
     def generate(self, query_text, context_blocks, chat_history=None):
         if chat_history is None:
             chat_history = []
@@ -45,25 +64,7 @@ class AnswerGenerator:
         # Append the new query with context
         messages.append({"role": "user", "content": f"Context blocks:\n\n{context_str}\n\nQuestion: {query_text}"})
 
-        url = f"{self.api_base.rstrip('/')}/chat/completions"
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        headers.update(self.extra_headers)
-        print(headers)
-
-        body = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-        }
-
-        resp = requests.post(url, headers=headers, json=body, timeout=120)
-        resp.raise_for_status()
-        data = resp.json()
-
-        raw = data["choices"][0]["message"]["content"] or ""
+        raw = self._call_llm(messages)
 
         abstained = raw.strip().upper().startswith("ABSTAIN:")
         conflict = raw.strip().upper().startswith("CONFLICT:")
@@ -164,6 +165,10 @@ def build_context_blocks(sections):
             "supporting_child_ids": section.get("child_ids", []),
             "retrieval_score": section.get("retrieval_score", 0.0),
             "rerank_score": section.get("rerank_score", section.get("score", 0.0)),
+            "chunk_type": section.get("chunk_type"),
+            "title": section.get("title"),
+            "source_url": section.get("source_url"),
+            "parent_id": section.get("parent_id"),
         })
     return blocks
 

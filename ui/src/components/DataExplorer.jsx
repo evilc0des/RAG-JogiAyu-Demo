@@ -14,7 +14,7 @@ function ChunkNode({ chunk, onSelect, level = 0, onResize }) {
     if (!expanded && hasChildren && !children) {
       setLoading(true);
       try {
-        const res = await api.get(`/chunks/${chunk.chunk_id}`);
+        const res = await api.get(`/api/chunks/${chunk.chunk_id}`);
         setChildren(res.data.children);
       } catch (err) {
         console.error("Failed to load children", err);
@@ -88,7 +88,7 @@ export default function DataExplorer({ onSelectChunk }) {
     setFetchingRanges(prev => new Set(prev).add(pageIdx));
     const offset = pageIdx * limit;
     try {
-      const res = await api.get(`/chunks?limit=${limit}&offset=${offset}`);
+      const res = await api.get(`/api/chunks?limit=${limit}&offset=${offset}`);
       setTotal(res.data.total);
       setChunksMap(prev => {
         const next = { ...prev };

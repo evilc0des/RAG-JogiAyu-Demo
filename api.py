@@ -87,6 +87,8 @@ class QueryRequest(BaseModel):
     model: str | None = "gemma-4-31B-it"
     temperature: float | None = 0.2
     chat_history: list[Message] = []
+    multi_hop: bool = False
+    max_hops: int | None = 3
 
 
 class Citation(BaseModel):
@@ -96,12 +98,24 @@ class Citation(BaseModel):
     supporting_child_ids: list[str]
 
 
+class HopTrace(BaseModel):
+    hop_number: int
+    sub_queries: list[str]
+    retrieved_section_ids: list[str]
+    action: str
+
+
 class SectionResult(BaseModel):
     chunk_id: str
     score: float
     rerank_score: float
     text: str
     child_ids: list[str]
+    doc_id: str | None = None
+    chunk_type: str | None = None
+    title: str | None = None
+    source_url: str | None = None
+    parent_id: str | None = None
 
 
 class QueryResponse(BaseModel):
@@ -111,6 +125,7 @@ class QueryResponse(BaseModel):
     abstained: bool
     reason: str | None
     sections: list[SectionResult]
+    hop_trace: list[HopTrace] | None = None
 
 
 @app.get("/health")
@@ -133,6 +148,79 @@ def query(request: QueryRequest):
     from retrieval import hybrid_retrieve_with_rerank
     from generation import build_context_blocks, AnswerGenerator
 
+    history_dicts = [{"role": m.role, "content": m.content} for m in request.chat_history]
+
+    if request.multi_hop:
+        from multi_hop import MultiHopOrchestrator
+
+        orchestrator = MultiHopOrchestrator({
+            "model": request.model,
+            "temperature": request.temperature,
+            "max_hops": request.max_hops or 3,
+        })
+        hop_trace, context_blocks = orchestrator.run(
+            request.query,
+            _sparse_retriever,
+            _dense_retriever,
+            _db,
+            chat_history=history_dicts,
+        )
+
+        try:
+            generator = AnswerGenerator({
+                "model": request.model,
+                "temperature": request.temperature,
+            })
+            answer = generator.generate(request.query, context_blocks, chat_history=history_dicts)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"LLM generation failed: {e}")
+
+        sections = [
+            SectionResult(
+                chunk_id=r.get("section_id", r.get("chunk_id", "")),
+                score=r.get("rerank_score", r.get("score", 0.0)),
+                rerank_score=r.get("rerank_score", r.get("score", 0.0)),
+                text=r.get("text", ""),
+                child_ids=r.get("supporting_child_ids", r.get("child_ids", [])),
+                doc_id=r.get("source_id"),
+                chunk_type=r.get("chunk_type"),
+                title=r.get("title"),
+                source_url=r.get("source_url"),
+                parent_id=r.get("parent_id"),
+            )
+            for r in context_blocks
+        ]
+
+        citations = [
+            Citation(
+                citation_id=c.get("citation_id", ""),
+                source_id=c.get("source_id"),
+                section_id=c.get("section_id"),
+                supporting_child_ids=c.get("supporting_child_ids", []),
+            )
+            for c in answer.get("citations", [])
+        ]
+
+        trace = [
+            HopTrace(
+                hop_number=h["hop_number"],
+                sub_queries=h["sub_queries"],
+                retrieved_section_ids=h["retrieved_section_ids"],
+                action=h["action"],
+            )
+            for h in hop_trace
+        ]
+
+        return QueryResponse(
+            answer_text=answer.get("answer_text"),
+            citations=citations,
+            grounded=answer.get("grounded", True),
+            abstained=answer.get("abstained", False),
+            reason=answer.get("reason"),
+            sections=sections,
+            hop_trace=trace,
+        )
+
     result = hybrid_retrieve_with_rerank(
         request.query,
         _sparse_retriever,
@@ -147,7 +235,6 @@ def query(request: QueryRequest):
             "model": request.model,
             "temperature": request.temperature,
         })
-        history_dicts = [{"role": m.role, "content": m.content} for m in request.chat_history]
         answer = generator.generate(request.query, context_blocks, chat_history=history_dicts)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"LLM generation failed: {e}")
@@ -157,8 +244,13 @@ def query(request: QueryRequest):
             chunk_id=r.get("chunk_id", ""),
             score=r.get("score", 0.0),
             rerank_score=r.get("rerank_score", r.get("score", 0.0)),
-            text=r.get("text", "")[:500],
+            text=r.get("text", ""),
             child_ids=r.get("child_ids", []),
+            doc_id=r.get("doc_id"),
+            chunk_type=r.get("chunk_type"),
+            title=r.get("title"),
+            source_url=r.get("source_url"),
+            parent_id=r.get("parent_id"),
         )
         for r in result["results"]
     ]

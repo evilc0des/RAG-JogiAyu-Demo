@@ -5,6 +5,8 @@ import { X, FileText, Database, Type, ListTree } from 'lucide-react';
 export default function ChunkViewer({ chunk, onClose }) {
   const [pageChunk, setPageChunk] = useState(null);
   const [loadingPage, setLoadingPage] = useState(false);
+  const [highlightText, setHighlightText] = useState(null);
+  const [highlightChunkId, setHighlightChunkId] = useState(null);
 
   useEffect(() => {
     if (!chunk) return;
@@ -12,14 +14,13 @@ export default function ChunkViewer({ chunk, onClose }) {
       setPageChunk(chunk);
     } else if (chunk.doc_id) {
       setLoadingPage(true);
-      api.get(`/pages/${chunk.doc_id}`)
+      api.get(`/api/pages/${chunk.doc_id}`)
         .then(res => {
           setPageChunk(res.data.page);
           setLoadingPage(false);
         })
         .catch(err => {
           console.error("Failed to load parent page", err);
-          // Fallback to just showing the chunk itself
           setPageChunk(chunk);
           setLoadingPage(false);
         });
@@ -29,15 +30,34 @@ export default function ChunkViewer({ chunk, onClose }) {
   }, [chunk]);
 
   useEffect(() => {
-    if (pageChunk && !loadingPage) {
-      setTimeout(() => {
+    if (!chunk?.child_ids?.length) {
+      setHighlightText(null);
+      setHighlightChunkId(null);
+      return;
+    }
+    const childId = chunk.child_ids[0];
+    setHighlightChunkId(childId);
+    api.get(`/api/chunks/${childId}`)
+      .then(res => {
+        setHighlightText(res.data.chunk.text);
+      })
+      .catch(err => {
+        console.error("Failed to load child chunk for highlighting", err);
+        setHighlightText(null);
+      });
+  }, [chunk]);
+
+  useEffect(() => {
+    if (pageChunk && !loadingPage && highlightText) {
+      const timer = setTimeout(() => {
         const el = document.getElementById('highlighted-chunk');
         if (el) {
           el.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
-      }, 100);
+      }, 150);
+      return () => clearTimeout(timer);
     }
-  }, [pageChunk, loadingPage, chunk]);
+  }, [pageChunk, loadingPage, highlightText]);
 
   if (!chunk) return null;
 
@@ -69,20 +89,11 @@ export default function ChunkViewer({ chunk, onClose }) {
     return lines.filter((_, idx) => keep[idx]).join('\n');
   };
 
-  const renderHighlightedText = () => {
-    const rawText = pageChunk?.text || "";
-    const textToSearch = deduplicateCumulativeText(rawText);
-    if (!pageChunk || chunk.chunk_id === pageChunk.chunk_id || !chunk.text) {
-      return textToSearch;
-    }
-    
-    // Simple exact match highlighting
-    const parts = textToSearch.split(chunk.text);
-    if (parts.length === 1) {
-      // Sometimes formatting/newlines might differ slightly, fallback to raw text if no match
-      return textToSearch; 
-    }
-    
+  const normalizeText = (text) => text.replace(/\s+/g, ' ').trim();
+
+  const findAndHighlight = (sourceText, searchText, displayText) => {
+    const parts = sourceText.split(searchText);
+    if (parts.length === 1) return null;
     return (
       <>
         {parts.map((part, i) => (
@@ -90,13 +101,32 @@ export default function ChunkViewer({ chunk, onClose }) {
             {part}
             {i < parts.length - 1 && (
               <mark className="bg-primary/40 text-text rounded px-1 font-semibold border border-primary/50 shadow-[0_0_10px_rgba(59,130,246,0.3)] inline-block" id="highlighted-chunk">
-                {chunk.text}
+                {displayText}
               </mark>
             )}
           </React.Fragment>
         ))}
       </>
     );
+  };
+
+  const renderHighlightedText = () => {
+    const rawText = pageChunk?.text || "";
+    const dedupText = deduplicateCumulativeText(rawText);
+    const targetText = highlightText || chunk.text;
+
+    if (!pageChunk || chunk.chunk_id === pageChunk.chunk_id || !targetText) {
+      return dedupText;
+    }
+
+    const highlight = findAndHighlight(dedupText, targetText, targetText)
+      || findAndHighlight(normalizeText(dedupText), normalizeText(targetText), targetText)
+      || findAndHighlight(rawText, targetText, targetText)
+      || findAndHighlight(normalizeText(rawText), normalizeText(targetText), targetText);
+
+    if (highlight) return highlight;
+
+    return dedupText;
   };
 
   return (
@@ -154,12 +184,18 @@ export default function ChunkViewer({ chunk, onClose }) {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <div className="text-xs text-textMuted mb-1">Target Chunk ID</div>
-                <div className="text-sm font-mono bg-background/50 p-2 rounded border border-border">{chunk.chunk_id}</div>
+                <div className="text-sm font-mono bg-background/50 p-2 rounded border border-border">{highlightChunkId || chunk.chunk_id}</div>
               </div>
               {chunk.parent_id && (
                 <div>
                   <div className="text-xs text-textMuted mb-1">Parent ID</div>
                   <div className="text-sm font-mono bg-background/50 p-2 rounded border border-border">{chunk.parent_id}</div>
+                </div>
+              )}
+              {highlightChunkId && highlightChunkId !== chunk.chunk_id && (
+                <div>
+                  <div className="text-xs text-textMuted mb-1">Section ID</div>
+                  <div className="text-sm font-mono bg-background/50 p-2 rounded border border-border">{chunk.chunk_id}</div>
                 </div>
               )}
               {chunk.source_url && (

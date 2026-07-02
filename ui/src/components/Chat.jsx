@@ -1,14 +1,15 @@
 import React, { useState, useRef, useEffect } from 'react';
 import api from '../api';
 import ReactMarkdown from 'react-markdown';
-import { Send, Bot, User, AlertCircle, Info } from 'lucide-react';
+import { Send, Bot, User, AlertCircle, Info, Brain } from 'lucide-react';
 
 export default function Chat({ onSelectChunk }) {
   const [messages, setMessages] = useState([
-    { role: 'assistant', content: 'Hello! I am your RAG Assistant. Ask me anything about the indexed documents.', sections: [] }
+    { role: 'assistant', content: 'Hello! I am your RAG Assistant. Ask me anything about the indexed documents.', sections: [], grounded: true, abstained: false, reason: null, hop_trace: null }
   ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [thinkingMode, setThinkingMode] = useState(false);
   
   const messagesEndRef = useRef(null);
 
@@ -37,10 +38,11 @@ export default function Chat({ onSelectChunk }) {
     try {
       const res = await api.post(`/query`, {
         query: userMessage.content,
-        chat_history: chatHistory
+        chat_history: chatHistory,
+        multi_hop: thinkingMode,
       });
 
-      const { answer_text, citations, grounded, abstained, reason, sections } = res.data;
+      const { answer_text, citations, grounded, abstained, reason, sections, hop_trace } = res.data;
       
       setMessages(prev => [...prev, {
         role: 'assistant',
@@ -49,7 +51,8 @@ export default function Chat({ onSelectChunk }) {
         grounded,
         abstained,
         reason,
-        sections
+        sections,
+        hop_trace: hop_trace || null,
       }]);
     } catch (err) {
       console.error(err);
@@ -148,6 +151,44 @@ export default function Chat({ onSelectChunk }) {
                     ))}
                   </div>
                 )}
+
+                {/* Hop trace */}
+                {msg.hop_trace && msg.hop_trace.length > 0 && (
+                  <details className="mt-3 pt-3 border-t border-border/50">
+                    <summary className="text-xs text-primary font-medium cursor-pointer hover:text-primaryHover transition-colors flex items-center gap-1.5">
+                      <Brain size={12} />
+                      Thinking trace ({msg.hop_trace.length} hop{msg.hop_trace.length !== 1 ? 's' : ''})
+                    </summary>
+                    <div className="mt-2 space-y-2">
+                      {msg.hop_trace.map((hop, idx) => (
+                        <div key={idx} className="bg-surface/50 border border-border rounded-lg p-3">
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <span className="text-[10px] font-semibold uppercase tracking-wider text-primary bg-primary/10 px-2 py-0.5 rounded">
+                              Hop {hop.hop_number}
+                            </span>
+                            <span className={`text-[10px] px-2 py-0.5 rounded ${
+                              hop.action === 'search'
+                                ? 'bg-amber-500/10 text-amber-400'
+                                : 'bg-green-500/10 text-green-400'
+                            }`}>
+                              {hop.action}
+                            </span>
+                          </div>
+                          {hop.sub_queries && hop.sub_queries.length > 0 && (
+                            <div className="space-y-1">
+                              <span className="text-[10px] text-textMuted uppercase tracking-wider">Sub-queries</span>
+                              {hop.sub_queries.map((sq, qi) => (
+                                <div key={qi} className="text-xs text-text bg-background rounded px-2 py-1 font-mono">
+                                  {sq}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
               </div>
             </div>
           ))}
@@ -169,6 +210,30 @@ export default function Chat({ onSelectChunk }) {
         {/* Input Area */}
         <div className="p-4 bg-background border-t border-border z-10">
           <form onSubmit={handleSubmit} className="relative max-w-4xl mx-auto flex items-end gap-2">
+            <label
+              className={`relative h-[52px] px-2 rounded-xl flex items-center gap-2 text-xs font-medium transition-all shrink-0 cursor-pointer select-none ${
+                thinkingMode
+                  ? 'bg-primary/20 text-primary border border-primary/40'
+                  : 'bg-surface border border-border text-textMuted'
+              }`}
+              title={thinkingMode ? 'Thinking Mode ON — multi-hop retrieval enabled' : 'Thinking Mode OFF — single-pass retrieval'}
+            >
+              <Brain size={16} className={thinkingMode ? 'text-primary' : 'opacity-40'} />
+              <span className="hidden sm:inline text-[11px]">Thinking Mode</span>
+              <div className={`relative w-8 h-5 rounded-full transition-colors duration-200 ${
+                thinkingMode ? 'bg-primary' : 'bg-border'
+              }`}>
+                <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all duration-200 ${
+                  thinkingMode ? 'left-3.5' : 'left-0.5'
+                }`} />
+              </div>
+              <input
+                type="checkbox"
+                checked={thinkingMode}
+                onChange={() => setThinkingMode(!thinkingMode)}
+                className="sr-only"
+              />
+            </label>
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
