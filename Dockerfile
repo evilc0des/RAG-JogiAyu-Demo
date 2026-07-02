@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     zlib1g \
     libcudnn9-cuda-12 \
+    rsync \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -L -o /tmp/qdrant.tar.gz \

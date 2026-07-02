@@ -2,8 +2,6 @@
 set -e
 
 # --- Raise OS limits for Qdrant + RocksDB with large collections ---
-# RocksDB opens many SST files; default limits cause "IO error: While open
-# a file for random read" on the second query with millions of vectors.
 ulimit -n 65536 2>/dev/null || echo "WARNING: could not raise open-file limit (ulimit -n)"
 if [ -w /proc/sys/vm/max_map_count ]; then
     echo 262144 > /proc/sys/vm/max_map_count
@@ -11,12 +9,36 @@ else
     echo "NOTE: cannot set vm.max_map_count (not privileged). If Qdrant crashes, run the container with --privileged or set on the host."
 fi
 
-if [ ! -L /app/data ]; then
-    ln -s /data /app/data
+# --- Data bootstrap: copy NFS /data to local storage for fast retrieval ---
+LOCAL_DATA="/app/data_local"
+NFS_DATA="/data"
+
+if [ "${SKIP_NFS_SYNC:-}" = "1" ] || [ "${SKIP_NFS_SYNC:-}" = "true" ]; then
+    echo "SKIP_NFS_SYNC is set. Using existing /app/data directly."
+    if [ ! -d /app/data ]; then
+        mkdir -p /app/data
+    fi
+else
+    mkdir -p "$LOCAL_DATA"
+
+    if [ -d "$NFS_DATA" ] && [ "$(ls -A "$NFS_DATA" 2>/dev/null)" ]; then
+        echo "Copying indices from NFS ($NFS_DATA) to local SSD ($LOCAL_DATA)..."
+        rsync -a --info=progress2 "$NFS_DATA/" "$LOCAL_DATA/"
+        echo "Copy complete."
+    elif [ -d "$LOCAL_DATA" ] && [ "$(ls -A "$LOCAL_DATA" 2>/dev/null)" ]; then
+        echo "NFS not available. Using previously cached local data at $LOCAL_DATA."
+    else
+        echo "No data found in NFS ($NFS_DATA) or local cache ($LOCAL_DATA)."
+        echo "Will attempt HuggingFace download if HF_DATASET_REPO is configured."
+    fi
+
+    # Point /app/data to local copy (backwards-compatible symlink)
+    if [ ! -L /app/data ]; then
+        ln -sf "$LOCAL_DATA" /app/data
+    fi
 fi
 
 mkdir -p /app/data/qdrant_storage
-
 export QDRANT__STORAGE__STORAGE_PATH=/app/data/qdrant_storage
 
 MODE="${1:-serve}"
