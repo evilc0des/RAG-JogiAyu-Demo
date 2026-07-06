@@ -84,7 +84,7 @@ class Message(BaseModel):
 
 class QueryRequest(BaseModel):
     query: str
-    model: str | None = "gemma-4-31B-it"
+    model: str | None = "Qwen/Qwen2.5-7B-Instruct"
     temperature: float | None = 0.2
     chat_history: list[Message] = []
     multi_hop: bool = False

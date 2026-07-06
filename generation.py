@@ -11,11 +11,25 @@ load_dotenv(_env_path, override=True)
 
 _CITATION_PATTERN = re.compile(r"\[S(\d+)\]")
 
+# Single capital letters (initials) and common abbreviations that should not
+# trigger sentence splits when followed by ". " — e.g. "J. F. Kennedy", "Dr. Smith"
+_ABBREV_PATTERN = re.compile(
+    r"\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|Gov|Sen|Rep|Capt|Lt|Col|Gen|Maj|Rev|Hon|[A-Z])\."
+)
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def _split_sentences(text):
+    protected = _ABBREV_PATTERN.sub(lambda m: m.group().replace(".", "\x00"), text)
+    parts = _SENTENCE_SPLIT.split(protected)
+    return [p.strip().replace("\x00", ".") for p in parts if p.strip()]
+
 
 class AnswerGenerator:
     def __init__(self, config=None):
         config = config or {}
-        self.model = config.get("model", "gpt-4o-mini")
+        self.model = config.get("model", "Qwen/Qwen2.5-7B-Instruct")
         self.temperature = config.get("temperature", 0.0)
         self.max_tokens = config.get("max_tokens", 1024)
         self.api_key = config.get("api_key") or os.environ.get("OPENAI_API_KEY")
@@ -132,17 +146,14 @@ class AnswerGenerator:
         if out_of_bounds:
             reasons.append(f"Citation indices out of bounds: {out_of_bounds}")
 
-        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", answer_text) if s.strip()]
+        sentences = _split_sentences(answer_text)
         factual_sentences = [
             s for s in sentences
             if not s.upper().startswith(("ABSTAIN:", "CONFLICT:"))
         ]
-        uncited = [
-            s[:80] for s in factual_sentences
-            if not _CITATION_PATTERN.search(s)
-        ]
-        if uncited and factual_sentences:
-            reasons.append(f"Sentences without citations: {len(uncited)}")
+        uncited_count = sum(1 for s in factual_sentences if not _CITATION_PATTERN.search(s))
+        if uncited_count > 0:
+            reasons.append(f"Sentences without citations: {uncited_count}")
 
         if not citations and not any(
             answer_text.strip().upper().startswith(p) for p in ("ABSTAIN:", "CONFLICT:")

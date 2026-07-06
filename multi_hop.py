@@ -5,7 +5,7 @@ import re
 class MultiHopOrchestrator:
     def __init__(self, config=None):
         config = config or {}
-        self.model = config.get("model", "gpt-4o-mini")
+        self.model = config.get("model", "Qwen/Qwen2.5-7B-Instruct")
         self.temperature = config.get("temperature", 0.0)
         self.max_hops = config.get("max_hops", 3)
         self.max_sub_queries_per_hop = config.get("max_sub_queries_per_hop", 3)

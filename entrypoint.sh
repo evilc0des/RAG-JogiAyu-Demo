@@ -105,6 +105,67 @@ else
     done
 fi
 
+# --- Start local LLM inference server (llama-cpp-python, OpenAI-compatible API) ---
+LLM_PORT="${LLM_PORT:-8001}"
+LLM_MODEL_REPO="${LLM_MODEL_REPO:-Qwen/Qwen2.5-7B-Instruct-GGUF}"
+LLM_MODEL_FILE="${LLM_MODEL_FILE:-qwen2.5-7b-instruct-q4_k_m.gguf}"
+LLM_N_GPU_LAYERS="${LLM_N_GPU_LAYERS:--1}"
+LLM_MAX_TOKENS="${LLM_MAX_TOKENS:-8192}"
+LLM_THREADS="${LLM_THREADS:-8}"
+OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://localhost:${LLM_PORT}/v1}"
+export OPENAI_BASE_URL
+
+# If OPENAI_BASE_URL still points to DigitalOcean or other remote, skip local LLM
+if echo "$OPENAI_BASE_URL" | grep -q "localhost\|127.0.0.1"; then
+    MODEL_DIR="/app/models"
+    MODEL_PATH="$MODEL_DIR/$LLM_MODEL_FILE"
+
+    if [ ! -f "$MODEL_PATH" ]; then
+        echo "Downloading LLM model from HuggingFace ($LLM_MODEL_REPO/$LLM_MODEL_FILE)..."
+        mkdir -p "$MODEL_DIR"
+        python3 -c "
+from huggingface_hub import hf_hub_download
+path = hf_hub_download('$LLM_MODEL_REPO', '$LLM_MODEL_FILE')
+import shutil, os
+dest = '$MODEL_PATH'
+if path != dest:
+    shutil.copy(path, dest)
+print(f'Model saved to {dest}')
+"
+        echo "Model download complete."
+    else
+        echo "LLM model found at $MODEL_PATH"
+    fi
+
+    echo "Starting llama.cpp inference server on port $LLM_PORT..."
+    python3 -m llama_cpp.server \
+        --model "$MODEL_PATH" \
+        --n_gpu_layers "$LLM_N_GPU_LAYERS" \
+        --n_ctx "$LLM_MAX_TOKENS" \
+        --n_threads "$LLM_THREADS" \
+        --host 0.0.0.0 \
+        --port "$LLM_PORT" \
+        &
+
+    echo "Waiting for llama.cpp server to be ready (model loading takes 10-30s)..."
+    for i in $(seq 1 120); do
+        if curl -sf "http://localhost:${LLM_PORT}/health" > /dev/null 2>&1; then
+            echo "LLM server is ready. (loaded in ${i}s)"
+            break
+        fi
+        if [ "$i" -eq 120 ]; then
+            echo "ERROR: LLM server failed to start within 120s"
+            exit 1
+        fi
+        if [ $((i % 10)) -eq 0 ]; then
+            echo "  Still waiting for LLM server... (${i}s elapsed)"
+        fi
+        sleep 1
+    done
+else
+    echo "OPENAI_BASE_URL=$OPENAI_BASE_URL is remote. Skipping local LLM start."
+fi
+
 case "$MODE" in
     index)
         echo "Running indexing: python3 index_data.py $@"
