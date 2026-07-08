@@ -293,7 +293,7 @@ class BenchmarkRunner:
             results = self._sparse.search(q["query"], top_k=30)
             timings.append((time.perf_counter() - t0) * 1000)
             all_results.append(results)
-            if (i + 1) % 200 == 0:
+            if (i + 1) % 20 == 0:
                 print(f"  {i + 1}/{len(queries)}")
         total_s = sum(timings) / 1000
         self.results["sparse"] = {
@@ -331,7 +331,7 @@ class BenchmarkRunner:
             embed_ms.append(et)
             search_ms.append(st)
             all_results.append(hits)
-            if (i + 1) % 200 == 0:
+            if (i + 1) % 20 == 0:
                 print(f"  {i + 1}/{len(queries)}")
         total_s = sum(timings) / 1000
         self.results["dense"] = {
@@ -355,7 +355,7 @@ class BenchmarkRunner:
             qt = q["query"]
             sparse_r.append(self._sparse.search(qt, top_k=50))
             dense_r.append(self._dense.search(qt, top_k=50))
-            if (i + 1) % 500 == 0:
+            if (i + 1) % 50 == 0:
                 print(f"    {i + 1}/{len(queries)}")
         timings = []
         for i, q in enumerate(queries):
@@ -396,7 +396,7 @@ class BenchmarkRunner:
                 top_k=50, sparse_k=50, dense_k=50, expand_to_section=False,
             )
             candidates_list.append(fr["results"])
-            if (i + 1) % 200 == 0:
+            if (i + 1) % 10 == 0:
                 print(f"    {i + 1}/{len(queries)}")
         timings = []
         all_reranked = []
@@ -405,7 +405,7 @@ class BenchmarkRunner:
             rr = self._reranker.rerank(q["query"], candidates_list[i], top_k=8)
             timings.append((time.perf_counter() - t0) * 1000)
             all_reranked.append(rr)
-            if (i + 1) % 200 == 0:
+            if (i + 1) % 10 == 0:
                 print(f"  {i + 1}/{len(queries)}")
         total_s = sum(timings) / 1000
         self.results["rerank"] = {
@@ -420,9 +420,9 @@ class BenchmarkRunner:
         self._load_retrievers()
         self._load_reranker()
         from retrieval import hybrid_retrieve
-        from reranking import assemble_section_context
-        print("\n--- Section Assembly (DB lookups) ---")
-        print("  pre-computing reranked children...")
+        from reranking import assemble_neighbor_context
+        print("\n--- Context Assembly (neighbor walk) ---")
+        print("  pre-computing reranked chunks...")
         reranked_list = []
         for i, q in enumerate(queries):
             fr = hybrid_retrieve(
@@ -431,12 +431,12 @@ class BenchmarkRunner:
             )
             rr = self._reranker.rerank(q["query"], fr["results"], top_k=8)
             reranked_list.append(rr)
-            if (i + 1) % 200 == 0:
+            if (i + 1) % 20 == 0:
                 print(f"    {i + 1}/{len(queries)}")
         timings = []
         for i, q in enumerate(queries):
             t0 = time.perf_counter()
-            assemble_section_context(reranked_list[i], self._db, top_sections=3)
+            assemble_neighbor_context(reranked_list[i], self._db, top_k=3)
             timings.append((time.perf_counter() - t0) * 1000)
         total_s = sum(timings) / 1000
         self.results["section_assembly"] = {
@@ -466,7 +466,7 @@ class BenchmarkRunner:
             for sec in result["results"]:
                 child_ids.extend(sec.get("child_ids", []))
             all_child_results.append([{"chunk_id": cid, "score": 1.0} for cid in child_ids])
-            if (i + 1) % 100 == 0:
+            if (i + 1) % 10 == 0:
                 print(f"  {i + 1}/{len(queries)}")
         total_s = sum(timings) / 1000
         self.results["combined_retrieval"] = {
