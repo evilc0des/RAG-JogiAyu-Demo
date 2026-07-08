@@ -8,11 +8,6 @@ data/
 .vscode/
 .idea/
 .env
-.env.*
-*.db
-*.pkl
-*.json
-*.sqlite
 logs/
 outputs/
 dist/
@@ -26,3 +21,4 @@ Thumbs.db
 .DS_Store
 desktop.ini
 plans/
+

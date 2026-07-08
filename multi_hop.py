@@ -5,7 +5,7 @@ import re
 class MultiHopOrchestrator:
     def __init__(self, config=None):
         config = config or {}
-        self.model = config.get("model", "Qwen/Qwen2.5-7B-Instruct")
+        self.model = config.get("model", "gemma-4-31B-it")
         self.temperature = config.get("temperature", 0.0)
         self.max_hops = config.get("max_hops", 3)
         self.max_sub_queries_per_hop = config.get("max_sub_queries_per_hop", 3)
@@ -34,13 +34,15 @@ class MultiHopOrchestrator:
 
     def execute_search(self, sub_queries, sparse_retriever, dense_retriever, db):
         from retrieval import hybrid_retrieve_with_rerank
-        from generation import build_context_blocks
 
         all_sections = {}
+        all_context_blocks = []
+        seen_ids = set()
+
         for sq in sub_queries:
             result = hybrid_retrieve_with_rerank(
                 sq, sparse_retriever, dense_retriever, db,
-                rerank_top_k=5, section_top_k=5,
+                rerank_top_k=5,
             )
             for section in result["results"]:
                 chunk_id = section.get("chunk_id")
@@ -60,17 +62,24 @@ class MultiHopOrchestrator:
                         existing["child_ids"] = section.get("child_ids", [])
                     existing["child_ids"] = list(set(existing.get("child_ids", []) + section.get("child_ids", [])))
 
+            for section in result["results"]:
+                chunk_id = section.get("chunk_id")
+                if chunk_id and chunk_id not in seen_ids:
+                    seen_ids.add(chunk_id)
+                    all_context_blocks.append(section)
+
         sections = list(all_sections.values())
         sections.sort(key=lambda s: s.get("rerank_score", s.get("score", 0)), reverse=True)
 
         section_ids = [s["chunk_id"] for s in sections]
-        context_blocks = build_context_blocks(sections) if sections else []
-        return sections, context_blocks, section_ids
+        return sections, all_context_blocks, section_ids
 
     def run(self, original_query, sparse_retriever, dense_retriever, db, chat_history=None):
         hop_trace = []
         accumulated_context_blocks = []
+        accumulated_sections = {}
         seen_section_ids = set()
+        seen_context_ids = set()
         previous_sub_queries = []
 
         for hop_number in range(self.max_hops):
@@ -132,8 +141,15 @@ class MultiHopOrchestrator:
                 "action": "search",
             })
 
+            for section in sections:
+                sid = section.get("chunk_id")
+                if sid and sid not in accumulated_sections:
+                    accumulated_sections[sid] = section
+
             for block in new_context_blocks:
-                if block.get("section_id") not in [b.get("section_id") for b in accumulated_context_blocks]:
+                bid = block.get("section_id")
+                if bid and bid not in seen_context_ids:
+                    seen_context_ids.add(bid)
                     accumulated_context_blocks.append(block)
 
         if not hop_trace or hop_trace[-1].get("action") != "answer":
@@ -144,7 +160,10 @@ class MultiHopOrchestrator:
                 "action": "answer (max hops reached)",
             })
 
-        return hop_trace, accumulated_context_blocks
+        all_sections = list(accumulated_sections.values())
+        all_sections.sort(key=lambda s: s.get("rerank_score", s.get("score", 0)), reverse=True)
+
+        return hop_trace, accumulated_context_blocks, all_sections
 
     def _parse_action_json(self, raw_text, hop_number):
         json_text = raw_text.strip()

@@ -29,7 +29,7 @@ def _split_sentences(text):
 class AnswerGenerator:
     def __init__(self, config=None):
         config = config or {}
-        self.model = config.get("model", "Qwen/Qwen2.5-7B-Instruct")
+        self.model = config.get("model", "gemma-4-31B-it")
         self.temperature = config.get("temperature", 0.0)
         self.max_tokens = config.get("max_tokens", 1024)
         self.api_key = config.get("api_key") or os.environ.get("OPENAI_API_KEY")
@@ -53,7 +53,13 @@ class AnswerGenerator:
         resp = requests.post(url, headers=headers, json=body, timeout=120)
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"] or ""
+        content = data["choices"][0]["message"].get("content")
+        reasoning = data["choices"][0]["message"].get("reasoning_content")
+        if content:
+            return content
+        if reasoning:
+            return reasoning
+        return ""
 
     def generate(self, query_text, context_blocks, chat_history=None):
         if chat_history is None:
@@ -128,8 +134,9 @@ class AnswerGenerator:
             if cid in seen:
                 continue
             seen.add(cid)
-            if idx < len(context_blocks):
-                block = context_blocks[idx]
+            clamped_idx = min(idx, len(context_blocks) - 1) if context_blocks else idx
+            if clamped_idx < len(context_blocks):
+                block = context_blocks[clamped_idx]
                 citations.append({
                     "citation_id": cid,
                     "source_id": block.get("source_id"),
@@ -168,29 +175,64 @@ class AnswerGenerator:
 def build_context_blocks(sections):
     blocks = []
     for section in sections:
-        blocks.append({
-            "source_id": section.get("doc_id"),
-            "section_id": section.get("chunk_id"),
-            "section_path": section.get("section_path"),
-            "text": section.get("text", ""),
-            "supporting_child_ids": section.get("child_ids", []),
-            "retrieval_score": section.get("retrieval_score", 0.0),
-            "rerank_score": section.get("rerank_score", section.get("score", 0.0)),
-            "chunk_type": section.get("chunk_type"),
-            "title": section.get("title"),
-            "source_url": section.get("source_url"),
-            "parent_id": section.get("parent_id"),
-        })
+        blocks.append(_make_context_block(section))
     return blocks
 
 
+def build_context_blocks_from_children(reranked_children):
+    blocks = []
+    for child in reranked_children:
+        parent_id = child.get("parent_id")
+        block = {
+            "source_id": child.get("doc_id"),
+            "section_id": parent_id or child.get("chunk_id"),
+            "section_path": child.get("section_path"),
+            "text": child.get("text", ""),
+            "supporting_child_ids": [child["chunk_id"]] if child.get("chunk_type") == "chunk" else [],
+            "retrieval_score": child.get("retrieval_score", 0.0),
+            "rerank_score": child.get("rerank_score", child.get("score", 0.0)),
+            "chunk_type": child.get("chunk_type"),
+            "title": child.get("title"),
+            "source_url": child.get("source_url"),
+            "parent_id": parent_id,
+            "keywords": child.get("keywords", []),
+            "topics": child.get("topics", []),
+            "doshas": child.get("doshas", []),
+            "symptoms": child.get("symptoms", []),
+            "treatments": child.get("treatments", []),
+        }
+        blocks.append(block)
+    return blocks
+
+
+def _make_context_block(item):
+    return {
+        "source_id": item.get("doc_id"),
+        "section_id": item.get("chunk_id"),
+        "section_path": item.get("section_path"),
+        "text": item.get("text", ""),
+        "supporting_child_ids": item.get("child_ids", []),
+        "retrieval_score": item.get("retrieval_score", 0.0),
+        "rerank_score": item.get("rerank_score", item.get("score", 0.0)),
+        "chunk_type": item.get("chunk_type"),
+        "title": item.get("title"),
+        "source_url": item.get("source_url"),
+        "parent_id": item.get("parent_id"),
+        "keywords": item.get("keywords", []),
+        "topics": item.get("topics", []),
+        "doshas": item.get("doshas", []),
+        "symptoms": item.get("symptoms", []),
+        "treatments": item.get("treatments", []),
+    }
+
+
 _SYSTEM_PROMPT = """\
-You are a precise answer generator. Follow these rules strictly:
+You are an Ayurvedic medicine educational assistant. Follow these rules strictly:
 
 1. Answer the question using ONLY facts from the provided context blocks.
 2. Each context block is prefixed with its index like [S00], [S01], etc.
 3. Every factual sentence in your answer MUST end with the citation marker of the \
-context block(s) it uses. Example: "The letter A is a vowel. [S00]"
+context block(s) it uses. Example: "Turmeric has anti-inflammatory properties. [S00]"
 4. If multiple blocks support the same claim, list all: [S00][S02]
 5. If the context blocks do NOT contain sufficient evidence to answer, respond with \
 exactly: ABSTAIN:
@@ -198,4 +240,8 @@ exactly: ABSTAIN:
 and respond with: CONFLICT:
 7. Do not use any knowledge outside the provided context blocks.
 8. Do not output a citation unless the cited block directly supports the claim.
-9. Keep answers concise and factual."""
+9. Keep answers concise and factual.
+10. When discussing treatments, include a disclaimer that this is educational \
+information and not medical advice. Patients should consult a qualified Ayurvedic practitioner.
+11. Reference Ayurvedic concepts (doshas, dhatus, agni, etc.) using their Sanskrit \
+names with brief English explanations where helpful."""

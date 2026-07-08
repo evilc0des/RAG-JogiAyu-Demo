@@ -1,6 +1,6 @@
 from collections import defaultdict
 
-from reranking import Reranker, assemble_section_context
+from reranking import Reranker, assemble_neighbor_context
 
 _reranker = None
 
@@ -53,14 +53,14 @@ def hybrid_retrieve(
         if chunk is None:
             continue
 
-        if expand_to_section and chunk.get("chunk_type") == "child":
-            section_id = chunk.get("parent_id")
-            if section_id:
-                section = db.get_chunk(section_id)
-                if section and section_id not in seen:
-                    seen.add(section_id)
+        if expand_to_section and chunk.get("chunk_type") == "chunk":
+            parent_id = chunk.get("parent_id")
+            if parent_id:
+                parent = db.get_chunk(parent_id)
+                if parent and parent_id not in seen:
+                    seen.add(parent_id)
                     result = {
-                        **section,
+                        **parent,
                         "score": fused_scores[chunk_id],
                         "child_ids": [chunk_id],
                         "sparse_rank": sparse_rank.get(chunk_id),
@@ -102,7 +102,6 @@ def hybrid_retrieve_with_rerank(
     db,
     fusion_top_k=50,
     rerank_top_k=8,
-    section_top_k=3,
     sparse_k=50,
     dense_k=50,
     rrf_k=60,
@@ -126,7 +125,7 @@ def hybrid_retrieve_with_rerank(
     reranker = _get_reranker()
     reranked_children = reranker.rerank(query_text, candidates, top_k=rerank_top_k)
 
-    sections = assemble_section_context(reranked_children, db, top_sections=section_top_k)
+    sections = assemble_neighbor_context(reranked_children, db, window_size=2)
 
     return {
         "query": query_text,

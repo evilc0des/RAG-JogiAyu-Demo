@@ -230,7 +230,7 @@ class BenchmarkRunner:
         elif sparse_index.exists():
             self._sparse = SparseRetriever.load(str(sparse_index))
             n_children = len(self._sparse.chunk_store)
-            db_total = self._db.count_children("child")
+            db_total = self._db.count_children("chunk")
             print(f"Sparse: single index ({n_children} children, DB has {db_total}) [WARNING: high RAM]")
             if n_children < 1000 and db_total > 1000:
                 print("  WARNING: sparse index has very few children vs DB. "
@@ -280,7 +280,7 @@ class BenchmarkRunner:
         for q in warmup_qs[:3]:
             hybrid_retrieve_with_rerank(
                 q["query"], self._sparse, self._dense, self._db,
-                fusion_top_k=50, rerank_top_k=8, section_top_k=3,
+                fusion_top_k=50, rerank_top_k=8,
                 sparse_k=50, dense_k=50,
             )
         print("  warmup complete.")
@@ -462,7 +462,7 @@ class BenchmarkRunner:
             t0 = time.perf_counter()
             result = hybrid_retrieve_with_rerank(
                 qt, self._sparse, self._dense, self._db,
-                fusion_top_k=50, rerank_top_k=8, section_top_k=3,
+                fusion_top_k=50, rerank_top_k=8,
                 sparse_k=50, dense_k=50,
             )
             timings.append((time.perf_counter() - t0) * 1000)
@@ -612,7 +612,7 @@ class BenchmarkRunner:
         tdb.commit()
         total_s = time.perf_counter() - t0
 
-        total_children = tdb.count_children("child")
+        total_children = tdb.count_children("chunk")
         total_sections = tdb.count_children("section")
         tdb.close()
 
@@ -687,7 +687,7 @@ class BenchmarkRunner:
         total_s = time.perf_counter() - t0
 
         tdb = ChunkStoreDB(str(temp_db))
-        total_children = tdb.count_children("child")
+        total_children = tdb.count_children("chunk")
         tdb.close()
 
         self.results["dense_indexing"] = {

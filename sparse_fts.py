@@ -33,8 +33,8 @@ class SparseFTS5Retriever:
     def build_from_db(self, chunks_db_path, batch_size=10000):
         """Populate FTS5 index from existing chunks.db.
 
-        Reads child chunks, pre-tokenizes text with the same regex tokenizer
-        used by the original BM25 shards, and inserts into FTS5.
+        Reads text chunks, pre-tokenizes text with the same regex tokenizer
+        used by the original BM25, and inserts into FTS5.
         Supports resume: skips rows already indexed.
         """
         fts_count = self.conn.execute(
@@ -43,7 +43,7 @@ class SparseFTS5Retriever:
 
         chunks_conn = sqlite3.connect(chunks_db_path)
         total = chunks_conn.execute(
-            "SELECT COUNT(*) FROM chunks WHERE chunk_type = 'child'"
+            "SELECT COUNT(*) FROM chunks WHERE chunk_type = 'chunk'"
         ).fetchone()[0]
 
         if fts_count >= total:
@@ -57,15 +57,13 @@ class SparseFTS5Retriever:
         offset = fts_count
         while offset < total:
             rows = chunks_conn.execute(
-                "SELECT chunk_id, text FROM chunks WHERE chunk_type = 'child' "
+                "SELECT chunk_id, text FROM chunks WHERE chunk_type = 'chunk' "
                 "ORDER BY rowid LIMIT ? OFFSET ?",
                 (batch_size, offset),
             ).fetchall()
             if not rows:
                 break
 
-            # Pre-tokenize with the same \w+ regex so FTS5 tokens match
-            # the original rank_bm25 tokenization exactly.
             batch = [
                 (" ".join(tokenize(text)), chunk_id)
                 for chunk_id, text in rows
@@ -77,10 +75,10 @@ class SparseFTS5Retriever:
             self.conn.commit()
             offset += len(rows)
             if (offset // batch_size) % 10 == 0 or offset >= total:
-                print(f"  FTS5: indexed {offset}/{total} children")
+                print(f"  FTS5: indexed {offset}/{total} chunks")
 
         chunks_conn.close()
-        print(f"  FTS5 index complete: {total} children")
+        print(f"  FTS5 index complete: {total} chunks")
 
     def search(self, query, top_k=5):
         """Search using BM25 ranking via FTS5.

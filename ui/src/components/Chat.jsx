@@ -1,16 +1,18 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import api from '../api';
 import ReactMarkdown from 'react-markdown';
 import { Send, Bot, User, AlertCircle, Info, Brain } from 'lucide-react';
 
 export default function Chat({ onSelectChunk }) {
   const [messages, setMessages] = useState([
-    { role: 'assistant', content: 'Hello! I am your RAG Assistant. Ask me anything about the indexed documents.', sections: [], grounded: true, abstained: false, reason: null, hop_trace: null }
+    { role: 'assistant', content: 'Namaste! I am your Ayurvedic Medicine Educational Assistant. Ask me about symptoms, treatments, doshas, herbal remedies, or any Ayurvedic concepts from the indexed knowledge base.', chunks: [], grounded: true, abstained: false, reason: null, hop_trace: null }
   ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [thinkingMode, setThinkingMode] = useState(false);
-  
+  const [tooltip, setTooltip] = useState(null);
+
   const messagesEndRef = useRef(null);
 
   const scrollToBottom = () => {
@@ -42,7 +44,7 @@ export default function Chat({ onSelectChunk }) {
         multi_hop: thinkingMode,
       });
 
-      const { answer_text, citations, grounded, abstained, reason, sections, hop_trace } = res.data;
+      const { answer_text, citations, grounded, abstained, reason, chunks, hop_trace } = res.data;
       
       setMessages(prev => [...prev, {
         role: 'assistant',
@@ -51,7 +53,7 @@ export default function Chat({ onSelectChunk }) {
         grounded,
         abstained,
         reason,
-        sections,
+        chunks,
         hop_trace: hop_trace || null,
       }]);
     } catch (err) {
@@ -64,6 +66,24 @@ export default function Chat({ onSelectChunk }) {
     }
     setLoading(false);
   };
+
+  const showCitationTooltip = (e, chunk) => {
+    const rect = e.target.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    let left = rect.left + rect.width / 2;
+    const maxRight = left + 144;
+    if (maxRight > viewportWidth - 8) {
+      left = viewportWidth - 144 - 8;
+    }
+    if (left < 8) left = 8;
+    setTooltip({
+      text: chunk?.text || '',
+      left,
+      top: rect.top - 8,
+    });
+  };
+
+  const hideCitationTooltip = () => setTooltip(null);
 
   return (
     <div className="flex h-full relative">
@@ -104,24 +124,29 @@ export default function Chat({ onSelectChunk }) {
                         if (props.href?.startsWith('#citation-')) {
                           const citationId = props.href.replace('#citation-', '');
                           const citation = msg.citations?.find(c => c.citation_id === citationId);
-                          const section = citation ? msg.sections?.find(s => s.chunk_id === citation.section_id) : null;
-                          
+                          const chunk = citation ? msg.chunks?.find(c => c.chunk_id === citation.section_id) : null;
+                          const hasChunk = chunk?.text;
+
                           return (
-                            <span className="relative inline-block group cursor-pointer ml-[2px]">
-                              <sup 
-                                className="text-primary font-bold hover:text-primaryHover transition-colors px-[2px]"
-                                onClick={(e) => {
+                            <span className="inline-block ml-[2px]">
+                              <sup
+                                className={`font-bold px-[2px] transition-colors ${
+                                  hasChunk
+                                    ? 'text-primary hover:text-primaryHover cursor-pointer'
+                                    : 'text-textMuted opacity-60'
+                                }`}
+                                onMouseEnter={hasChunk ? (e) => showCitationTooltip(e, chunk) : undefined}
+                                onMouseLeave={hasChunk ? hideCitationTooltip : undefined}
+                                onClick={hasChunk ? (e) => {
                                   e.preventDefault();
-                                  if (section) onSelectChunk(section);
-                                }}
+                                  e.stopPropagation();
+                                  hideCitationTooltip();
+                                  onSelectChunk(chunk);
+                                } : undefined}
+                                title={!hasChunk ? 'No chunk data available for this citation' : undefined}
                               >
                                 {citationId}
                               </sup>
-                              {section && (
-                                <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 w-64 p-3 bg-surface border border-border text-xs text-text rounded shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none line-clamp-5 leading-relaxed">
-                                  {section.text}
-                                </span>
-                              )}
                             </span>
                           );
                         }
@@ -140,9 +165,14 @@ export default function Chat({ onSelectChunk }) {
                       <button
                         key={idx}
                         onClick={() => {
-                          const sec = msg.sections?.find(s => s.chunk_id === cit.section_id);
-                          if (sec) onSelectChunk(sec);
+                          const chk = msg.chunks?.find(c => c.chunk_id === cit.section_id);
+                          if (chk) onSelectChunk(chk);
                         }}
+                        onMouseEnter={(e) => {
+                          const chk = msg.chunks?.find(c => c.chunk_id === cit.section_id);
+                          showCitationTooltip(e, chk);
+                        }}
+                        onMouseLeave={hideCitationTooltip}
                         className="text-xs bg-surface border border-border px-2 py-1 rounded-md hover:bg-border transition-colors flex items-center gap-1.5"
                       >
                         <Info size={12} className="text-primary" />
@@ -260,6 +290,21 @@ export default function Chat({ onSelectChunk }) {
           </div>
         </div>
       </div>
+
+      {/* Portal tooltip — rendered to document.body to avoid overflow clipping */}
+      {tooltip && createPortal(
+        <div
+          className="fixed z-[9999] w-72 p-3 bg-surface border border-border text-xs text-text rounded shadow-2xl leading-relaxed pointer-events-none"
+          style={{
+            left: `${tooltip.left}px`,
+            top: `${tooltip.top}px`,
+            transform: 'translate(-50%, -100%)',
+          }}
+        >
+          <div className="line-clamp-5">{tooltip.text}</div>
+        </div>,
+        document.body
+      )}
     </div>
   );
 }

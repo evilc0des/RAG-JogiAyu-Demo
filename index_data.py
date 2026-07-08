@@ -3,53 +3,36 @@ import os
 import shutil
 from pathlib import Path
 
-from chunking import process_pages
+from ingestion.pipeline import IngestionPipeline, PipelineConfig
+from ingestion.connectors import DirectoryConnector, FileConnector
 from db import ChunkStoreDB
 
 
-DB_PATH = "data/chunks.db"
-SPARSE_SHARDS_DIR = "data/sparse_shards"
-DENSE_PATH = "data/qdrant"
-
-
-def _index_progress(event, *args):
-    if event == "parallel":
-        n_pages, w, chunksize = args
-        print(f"Processing {n_pages} pages with {w} workers (chunksize={chunksize})...", flush=True)
-    elif event == "sequential":
-        n_pages, _, _ = args
-        print(f"Processing {n_pages} pages sequentially...", flush=True)
-    elif event == "page":
-        page_count, n_children, n_sections = args
-        print(f"Page {page_count}: {n_sections} sections, {n_children} children", flush=True)
-
-
 def main():
-    from indexing import build_sparse_indexes_from_db, build_dense_index_from_db
-    from sparse_fts import SparseFTS5Retriever
-
     qdrant_url = os.environ.get("QDRANT_URL")
     qdrant_api_key = os.environ.get("QDRANT_API_KEY") or None
 
-    parser = argparse.ArgumentParser(description="Ingest and index Wikipedia pages for RAG")
-    parser.add_argument("--pages", type=int, default=2000, help="Number of pages to process (default: 2000)")
-    parser.add_argument("--workers", type=int, default=os.cpu_count(),
-                        help=f"Number of parallel chunking workers (default: {os.cpu_count()})")
+    parser = argparse.ArgumentParser(description="Ayurveda RAG - Build indices from ingested documents")
+    parser.add_argument("--data-dir", type=str, default="data/raw",
+                        help="Directory containing source files to ingest (default: data/raw)")
     parser.add_argument("--rebuild", action="store_true",
-                        help="Delete existing data and re-index from scratch (ignores resume state)")
+                        help="Delete existing data and re-index from scratch")
     parser.add_argument("--skip-chunking", action="store_true",
                         help="Skip chunking step (use when chunks.db is already populated)")
+    parser.add_argument("--chunk-size", type=int, default=512, help="Chunk size in tokens")
+    parser.add_argument("--chunk-overlap", type=int, default=64, help="Chunk overlap in tokens")
+    parser.add_argument("--no-semantic", action="store_true", help="Disable semantic splitting")
     parser.add_argument("--legacy-bm25", action="store_true",
-                        help="Build old-style rank_bm25 pickle shards instead of FTS5 (high RAM usage)")
+                        help="Build old-style rank_bm25 pickle shards instead of FTS5")
     args = parser.parse_args()
 
-    max_pages = args.pages
-    workers = args.workers
-
+    DB_PATH = "data/chunks.db"
+    SPARSE_SHARDS_DIR = "data/sparse_shards"
     FTS_DB_PATH = "data/sparse_fts.db"
+    DENSE_PATH = "data/qdrant"
 
     if args.rebuild:
-        print("Rebuild requested — deleting existing data...")
+        print("Rebuild requested - deleting existing data...")
         for suffix in ("", "-shm", "-wal"):
             p = Path(DB_PATH + suffix)
             if p.exists():
@@ -77,78 +60,57 @@ def main():
     Path(SPARSE_SHARDS_DIR).mkdir(parents=True, exist_ok=True)
 
     db = ChunkStoreDB(DB_PATH)
-    page_count = db.count_children("page")
+    doc_count = db.count_children("document")
 
     if args.skip_chunking:
-        print(f"Skipping chunking (--skip-chunking). chunks.db has {page_count} pages.")
-        db.close()
-    elif page_count >= max_pages:
-        print(f"Already indexed {page_count} pages (target: {max_pages}). Skipping chunking.")
+        print(f"Skipping chunking. chunks.db has {doc_count} documents, {db.count_children('chunk')} chunks.")
         db.close()
     else:
-        from datasets import load_dataset
-        ds = load_dataset("facebook/kilt_wikipedia", split="full", streaming=True)
-
-        last_child_id = db.get_last_chunk_id("child")
-        last_section_id = db.get_last_chunk_id("section")
-        last_page_id = db.get_last_chunk_id("page")
-
-        if page_count > 0:
-            last_doc_id = db.get_last_page_doc_id()
-            print(f"Resuming from page {page_count} (last doc_id={last_doc_id}). "
-                  f"child={last_child_id}, section={last_section_id}, page={last_page_id}")
-            print("Skipping already-processed pages...")
-
-        CHUNKING_BATCH = 10000
-        skip_target = page_count
-        pages = []
-        skipped = 0
-        for s in ds.take(max_pages):
-            if skipped < skip_target:
-                skipped += 1
-                if skipped % 1000 == 0:
-                    print(f"  Skipped {skipped}/{skip_target} pages...")
-                continue
-            pages.append(s)
-            if len(pages) % 1000 == 0:
-                print(f"  Collected {len(pages)} pages (streaming)...", flush=True)
-            if len(pages) >= CHUNKING_BATCH:
-                print(f"  Processing batch of {len(pages)} pages (total: ~{page_count + len(pages)})...", flush=True)
-                last_child_id, last_section_id, last_page_id, page_count = process_pages(
-                    pages, db,
-                    last_child_id=last_child_id,
-                    last_section_id=last_section_id,
-                    last_page_id=last_page_id,
-                    page_count=page_count,
-                    workers=workers,
-                    progress=_index_progress,
-                )
-                db.commit()
-                pages = []
-
-        if pages:
-            print(f"  Processing final batch of {len(pages)} pages (total: ~{page_count + len(pages)})...", flush=True)
-            last_child_id, last_section_id, last_page_id, page_count = process_pages(
-                pages, db,
-                last_child_id=last_child_id,
-                last_section_id=last_section_id,
-                last_page_id=last_page_id,
-                page_count=page_count,
-                workers=workers,
-                progress=_index_progress,
-            )
-            db.commit()
-
-        if page_count > 0:
-            print(f"Chunking complete. {page_count} pages, {db.count_children('child')} children in SQLite.")
-
         db.close()
+        data_dir = Path(args.data_dir)
+        if not data_dir.exists():
+            print(f"Data directory '{args.data_dir}' not found. Creating it...")
+            data_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Place source files (transcripts, books) in '{args.data_dir}' and re-run.")
+            return
+
+        files = list(data_dir.rglob("*"))
+        if not any(f.is_file() for f in files):
+            print(f"No files found in '{args.data_dir}'. Place source files there and re-run.")
+            return
+
+        print(f"Ingesting files from '{args.data_dir}'...")
+
+        config = PipelineConfig(
+            chunk_size=args.chunk_size,
+            chunk_overlap=args.chunk_overlap,
+            split_on_paragraphs=True,
+            use_semantic_splitting=not args.no_semantic,
+            use_llm_metadata=False,
+            storage_dir="data",
+        )
+
+        pipeline = IngestionPipeline(config)
+        connector = DirectoryConnector(data_dir)
+        job = pipeline.run(connector)
+
+        print(f"Ingestion status: {job.status}")
+        print(f"Message: {job.message}")
+        if job.errors:
+            print(f"Errors: {job.errors}")
+
+        if job.status != "completed":
+            print("Ingestion did not complete successfully. Skipping index build.")
+            return
+
+    from indexing import build_sparse_indexes_from_db, build_dense_index_from_db
+    from sparse_fts import SparseFTS5Retriever
 
     if args.legacy_bm25:
         build_sparse_indexes_from_db(DB_PATH, SPARSE_SHARDS_DIR, shard_size=100000)
         print("Sparse (BM25 sharded) indexes built.")
     else:
-        print("Building FTS5 sparse index (disk-backed, low RAM)...")
+        print("Building FTS5 sparse index...")
         fts = SparseFTS5Retriever(FTS_DB_PATH)
         fts.build_from_db(DB_PATH)
         fts.close()
@@ -157,9 +119,8 @@ def main():
     build_dense_index_from_db(DB_PATH, DENSE_PATH, batch_size=1000,
                               qdrant_url=qdrant_url, qdrant_api_key=qdrant_api_key)
     print("Dense (Qdrant) index built.")
-
     print("Indexing complete.")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

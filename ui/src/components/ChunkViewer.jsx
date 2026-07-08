@@ -10,7 +10,7 @@ export default function ChunkViewer({ chunk, onClose }) {
 
   useEffect(() => {
     if (!chunk) return;
-    if (chunk.chunk_type === 'page') {
+    if (chunk.chunk_type === 'page' || chunk.chunk_type === 'document') {
       setPageChunk(chunk);
     } else if (chunk.doc_id) {
       setLoadingPage(true);
@@ -135,13 +135,13 @@ export default function ChunkViewer({ chunk, onClose }) {
       <div className="flex items-center justify-between p-4 border-b border-border bg-surface">
         <div className="flex items-center gap-3">
           <div className="p-2 bg-primary/10 rounded-lg">
-            {chunk.chunk_type === 'page' ? <FileText size={20} className="text-primary" /> : <Type size={20} className="text-primary" />}
+            {chunk.chunk_type === 'page' || chunk.chunk_type === 'document' ? <FileText size={20} className="text-primary" /> : <Type size={20} className="text-primary" />}
           </div>
           <div>
             <h2 className="text-lg font-semibold text-text">{pageChunk?.title || chunk.title || chunk.chunk_id}</h2>
             <div className="flex items-center gap-2 mt-1">
               <span className="text-xs bg-border px-2 py-0.5 rounded text-textMuted uppercase tracking-wider font-semibold">
-                {chunk.chunk_type === 'page' ? 'Page' : 'Page Context'}
+                {chunk.chunk_type === 'page' || chunk.chunk_type === 'document' ? 'Document' : 'Context'}
               </span>
               {chunk.doc_id && (
                 <span className="text-xs text-textMuted flex items-center gap-1">

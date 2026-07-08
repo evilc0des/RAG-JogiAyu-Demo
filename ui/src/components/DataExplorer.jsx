@@ -25,7 +25,7 @@ function ChunkNode({ chunk, onSelect, level = 0, onResize }) {
   };
 
   const getIcon = () => {
-    if (chunk.chunk_type === 'page') return <FileText size={16} className="text-primary" />;
+    if (chunk.chunk_type === 'page' || chunk.chunk_type === 'document') return <FileText size={16} className="text-primary" />;
     return <Type size={16} className="text-textMuted" />;
   };
 

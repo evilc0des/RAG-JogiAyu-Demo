@@ -35,51 +35,76 @@ class Reranker:
         return candidates[:top_k]
 
 
-def assemble_section_context(child_results, db, top_sections=3):
+def assemble_neighbor_context(child_results, db, window_size=2, top_k=None):
     if not child_results:
         return []
 
-    sections = defaultdict(lambda: {
-        "best_rerank_score": -999.0,
-        "best_retrieval_score": -999.0,
-        "child_ids": [],
-    })
-
-    for child in child_results:
-        parent_id = child.get("parent_id")
-        if not parent_id:
-            continue
-        section = db.get_chunk(parent_id)
-        if section is None:
-            continue
-
-        rerank_score = child.get("rerank_score", -999.0)
-        retrieval_score = child.get("retrieval_score", child.get("score", 0.0))
-        entry = sections[parent_id]
-        entry["child_ids"].append(child["chunk_id"])
-        if rerank_score > entry["best_rerank_score"]:
-            entry["best_rerank_score"] = rerank_score
-        if retrieval_score > entry["best_retrieval_score"]:
-            entry["best_retrieval_score"] = retrieval_score
-
-    sorted_sections = sorted(
-        sections.items(),
-        key=lambda kv: kv[1]["best_rerank_score"],
-        reverse=True,
-    )
-    sorted_sections = sorted_sections[:top_sections]
-
     results = []
-    for section_id, data in sorted_sections:
-        section = db.get_chunk(section_id)
-        if section is None:
+    seen_ids = set()
+
+    children = child_results[:top_k] if top_k else child_results
+
+    for child in children:
+        chunk_id = child["chunk_id"]
+        if chunk_id in seen_ids:
             continue
+        seen_ids.add(chunk_id)
+
+        prev_chunks = _walk_prev(child, db, window_size)
+        next_chunks = _walk_next(child, db, window_size)
+
+        all_chunks = prev_chunks + [child] + next_chunks
+        assembled_text = "\n\n".join(c["text"] for c in all_chunks)
+
         results.append({
-            **section,
-            "score": data["best_rerank_score"],
-            "rerank_score": data["best_rerank_score"],
-            "retrieval_score": data["best_retrieval_score"],
-            "child_ids": data["child_ids"],
+            "chunk_id": child["chunk_id"],
+            "text": assembled_text,
+            "score": child.get("rerank_score", child.get("score", 0.0)),
+            "rerank_score": child.get("rerank_score", child.get("score", 0.0)),
+            "retrieval_score": child.get("retrieval_score", child.get("score", 0.0)),
+            "source_id": child.get("doc_id"),
+            "section_id": child.get("chunk_id"),
+            "child_ids": [child["chunk_id"]],
+            "supporting_child_ids": [child["chunk_id"]],
+            "doc_id": child.get("doc_id"),
+            "chunk_type": child.get("chunk_type"),
+            "title": child.get("title"),
+            "source_url": child.get("source_url"),
+            "parent_id": child.get("parent_id"),
+            "section_path": child.get("section_path"),
+            "keywords": child.get("keywords", []),
+            "topics": child.get("topics", []),
+            "doshas": child.get("doshas", []),
+            "symptoms": child.get("symptoms", []),
+            "treatments": child.get("treatments", []),
         })
 
     return results
+
+
+def _walk_prev(chunk, db, steps):
+    prevs = []
+    prev_id = chunk.get("prev_id")
+    for _ in range(steps):
+        if not prev_id:
+            break
+        prev = db.get_chunk(prev_id)
+        if prev is None:
+            break
+        prevs.insert(0, prev)
+        prev_id = prev.get("prev_id")
+    return prevs
+
+
+def _walk_next(chunk, db, steps):
+    nexts = []
+    next_id = chunk.get("next_id")
+    for _ in range(steps):
+        if not next_id:
+            break
+        nxt = db.get_chunk(next_id)
+        if nxt is None:
+            break
+        nexts.append(nxt)
+        next_id = nxt.get("next_id")
+    return nexts

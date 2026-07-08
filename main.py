@@ -32,7 +32,7 @@ print(f"Dense index loaded: {len(dense_retriever.chunk_store)} children  [qdrant
 db = ChunkStoreDB("data/chunks.db")
 print(f"Chunk store loaded: {db.count_children()} entries")
 
-query = sys.argv[1] if len(sys.argv) > 1 else "What is the pronunciation and etymology of the letter Z?"
+query = sys.argv[1] if len(sys.argv) > 1 else "What are common Ayurvedic treatments for digestive issues?"
 
 result = hybrid_retrieve_with_rerank(
     query,
@@ -53,7 +53,7 @@ for i, r in enumerate(result["results"]):
 print("\n=== Generated Answer ===")
 
 context_blocks = build_context_blocks(result["results"])
-generator = AnswerGenerator({"model": "Qwen/Qwen2.5-7B-Instruct", "temperature": 0.2})
+generator = AnswerGenerator({"model": "gemma-4-31B-it", "temperature": 0.2})
 answer = generator.generate(result["query"], context_blocks)
 
 print(f"Grounded:  {answer['grounded']}")

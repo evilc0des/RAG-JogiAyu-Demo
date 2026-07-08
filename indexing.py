@@ -25,10 +25,10 @@ class SparseRetriever:
         self._is_sharded = False
 
     def index(self, chunks):
-        children = [c for c in chunks if c.get("chunk_type") == "child"]
-        self.corpus = [tokenize(c["text"]) for c in children]
+        text_chunks = [c for c in chunks if c.get("chunk_type") == "chunk"]
+        self.corpus = [tokenize(c["text"]) for c in text_chunks]
         self.bm25 = BM25Okapi(self.corpus)
-        self.chunk_store = children
+        self.chunk_store = text_chunks
         self._is_sharded = False
 
     def search(self, query, top_k=5):
@@ -113,10 +113,47 @@ class DenseRetriever:
             model_name=model_name,
             providers=providers,
         )
+        self.client = None
         if self._is_remote:
-            self.client = QdrantClient(url=self._qdrant_url, api_key=self._qdrant_api_key)
-        else:
-            self.client = QdrantClient(path=storage_path)
+            try:
+                self.client = QdrantClient(url=self._qdrant_url, api_key=self._qdrant_api_key, timeout=5)
+                self.client.collection_exists(collection_name)
+            except Exception as e:
+                import sys
+                print(
+                    f"  WARNING: Remote Qdrant at {self._qdrant_url} is unreachable "
+                    f"({e}). Falling back to local disk storage at {storage_path}.",
+                    file=sys.stderr,
+                )
+                self._is_remote = False
+        if not self._is_remote:
+            try:
+                self.client = QdrantClient(path=storage_path)
+                self.client.collection_exists(collection_name)
+            except Exception as e:
+                import sys, shutil
+                print(
+                    f"  WARNING: Local Qdrant storage at {storage_path} is unavailable "
+                    f"({e}). Resetting...",
+                    file=sys.stderr,
+                )
+                try:
+                    self.client.close() if hasattr(self, 'client') and self.client else None
+                except Exception:
+                    pass
+                shutil.rmtree(storage_path, ignore_errors=True)
+                import time
+                time.sleep(0.5)
+                try:
+                    self.client = QdrantClient(path=storage_path)
+                except Exception:
+                    import sys
+                    print(
+                        f"  ERROR: Could not access local Qdrant storage at {storage_path}. "
+                        f"Close any other processes using it and try again.",
+                        file=sys.stderr,
+                    )
+                    raise
         self.chunk_store = []
 
         if not self.client.collection_exists(collection_name):
@@ -129,12 +166,12 @@ class DenseRetriever:
             )
 
     def index(self, chunks):
-        children = [c for c in chunks if c.get("chunk_type") == "child"]
-        if not children:
+        text_chunks = [c for c in chunks if c.get("chunk_type") == "chunk"]
+        if not text_chunks:
             self.chunk_store = []
             return
 
-        self.chunk_store = children
+        self.chunk_store = text_chunks
 
         if self.client.collection_exists(self.collection_name):
             self.client.delete_collection(self.collection_name)
@@ -146,7 +183,7 @@ class DenseRetriever:
             ),
         )
 
-        texts = [c["text"] for c in children]
+        texts = [c["text"] for c in text_chunks]
         embeddings = _embed_batch(self, texts)
 
         points = [
@@ -167,9 +204,14 @@ class DenseRetriever:
                     "next_id": chunk.get("next_id"),
                     "parent_id": chunk.get("parent_id"),
                     "children_ids": chunk.get("children_ids", []),
+                    "keywords": chunk.get("keywords", []),
+                    "topics": chunk.get("topics", []),
+                    "doshas": chunk.get("doshas", []),
+                    "symptoms": chunk.get("symptoms", []),
+                    "treatments": chunk.get("treatments", []),
                 },
             )
-            for chunk, emb in zip(children, embeddings)
+            for chunk, emb in zip(text_chunks, embeddings)
         ]
         self.client.upsert(collection_name=self.collection_name, points=points)
 
@@ -227,7 +269,7 @@ def _build_single_sparse_shard(args):
     db_path, offset, shard_size, shard_id, output_dir = args
     from db import ChunkStoreDB
     db = ChunkStoreDB(db_path)
-    batch = db.get_children_by_type("child", limit=shard_size, offset=offset)
+    batch = db.get_children_by_type("chunk", limit=shard_size, offset=offset)
     db.close()
     if not batch:
         return None
@@ -242,7 +284,7 @@ def _build_single_sparse_shard(args):
 def build_sparse_indexes_from_db(db_path, output_dir, shard_size=100000):
     from db import ChunkStoreDB
     db = ChunkStoreDB(db_path)
-    total = db.count_children("child")
+    total = db.count_children("chunk")
     db.close()
 
     output_path = Path(output_dir)
@@ -314,7 +356,7 @@ def build_dense_index_from_db(db_path, dense_path, batch_size=1000,
                               qdrant_url=None, qdrant_api_key=None):
     from db import ChunkStoreDB
     db = ChunkStoreDB(db_path)
-    total = db.count_children("child")
+    total = db.count_children("chunk")
 
     dense = DenseRetriever(storage_path=dense_path, qdrant_url=qdrant_url,
                            qdrant_api_key=qdrant_api_key)
@@ -324,7 +366,7 @@ def build_dense_index_from_db(db_path, dense_path, batch_size=1000,
     if collection_exists:
         existing_count = dense.client.count(collection_name=dense.collection_name).count
         if existing_count == total:
-            print(f"  Dense index already complete ({total}/{total} children). Skipping.")
+            print(f"  Dense index already complete ({total}/{total} chunks). Skipping.")
             db.close()
             return
         if existing_count > 0:
@@ -340,7 +382,7 @@ def build_dense_index_from_db(db_path, dense_path, batch_size=1000,
         )
 
     for offset in range(existing_count, total, batch_size):
-        batch = db.get_children_by_type("child", limit=batch_size, offset=offset)
+        batch = db.get_children_by_type("chunk", limit=batch_size, offset=offset)
         if not batch:
             break
         texts = [c["text"] for c in batch]
@@ -364,6 +406,11 @@ def build_dense_index_from_db(db_path, dense_path, batch_size=1000,
                     "next_id": chunk.get("next_id"),
                     "parent_id": chunk.get("parent_id"),
                     "children_ids": chunk.get("children_ids", []),
+                    "keywords": chunk.get("keywords", []),
+                    "topics": chunk.get("topics", []),
+                    "doshas": chunk.get("doshas", []),
+                    "symptoms": chunk.get("symptoms", []),
+                    "treatments": chunk.get("treatments", []),
                 },
             )
             for chunk, emb in zip(batch, embeddings)
@@ -371,10 +418,10 @@ def build_dense_index_from_db(db_path, dense_path, batch_size=1000,
         dense.client.upsert(collection_name=dense.collection_name, points=points)
 
         if (offset // batch_size) % 10 == 0:
-            print(f"  Dense: embedded {offset + len(batch)}/{total} children")
+            print(f"  Dense: embedded {offset + len(batch)}/{total} chunks")
 
     db.close()
-    print(f"  Dense: embedded {total}/{total} children")
+    print(f"  Dense: embedded {total}/{total} chunks")
 
 
 def _qdrant_headers(api_key):
