@@ -25,7 +25,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from db import ChunkStoreDB
-from chunking import process_pages
 
 
 def latency_stats(timings_ms):
@@ -135,49 +134,46 @@ class QueryDataset:
                 return queries[:num_queries]
             print(f"  cached ({len(queries)}) insufficient, regenerating...")
 
-        print(f"Generating queries from {num_pages} Wikipedia pages...")
+        print(f"Generating queries from ingested documents in {self.db_path}...")
         db = ChunkStoreDB(self.db_path)
 
-        from datasets import load_dataset
-        ds = load_dataset(
-            "facebook/kilt_wikipedia", split="full",
-            streaming=True,
-        )
+        doc_count = db.count_children("document")
+        if doc_count == 0:
+            print("  No documents found in DB. Ingest data before running benchmarks.")
+            db.close()
+            return []
+
+        docs = db.get_children_by_type("document", limit=min(num_pages, doc_count))
 
         queries = []
-        page_count = 0
-        target_pool = num_queries * 3
+        for doc in docs:
+            children_ids = doc.get("children_ids", [])
+            if not children_ids:
+                continue
+            title = doc.get("title", "")
+            text = doc.get("text", "")
+            if not title or len(title) < 3:
+                continue
+            queries.append({
+                "query": title,
+                "doc_id": doc.get("doc_id"),
+                "ground_truth": children_ids,
+            })
 
-        for page in ds:
-            if page_count >= num_pages:
-                break
-            page_count += 1
-
-            if page_count % 500 == 0:
-                print(f"  scanned {page_count} pages, {len(queries)} valid queries...")
-
-            doc_id = str(page["wikipedia_id"])
-            sections = db.get_chunks_by_doc_id(doc_id, "section")
-
-            for section in sections:
-                children_ids = section.get("children_ids", [])
-                if not children_ids:
-                    continue
-                text = section.get("text", "")
-                title = text.split("\n")[0].strip() if text else ""
-                if not title or len(title) < 3:
-                    continue
+        # Also generate queries from chunk text snippets for variety
+        all_chunks = db.get_children_by_type("chunk", limit=min(num_queries, 5000))
+        for chunk in all_chunks:
+            chunk_text = chunk.get("text", "")
+            first_sentence = chunk_text.split(".")[0].strip() if chunk_text else ""
+            if len(first_sentence) > 20 and len(first_sentence) < 200:
                 queries.append({
-                    "query": title,
-                    "doc_id": doc_id,
-                    "ground_truth": children_ids,
+                    "query": first_sentence,
+                    "doc_id": chunk.get("doc_id"),
+                    "ground_truth": [chunk["chunk_id"]],
                 })
 
-            if len(queries) >= target_pool:
-                break
-
         db.close()
-        print(f"Generated {len(queries)} candidate queries from {page_count} pages")
+        print(f"Generated {len(queries)} candidate queries from {len(docs)} documents + {len(all_chunks)} chunks")
 
         random.seed(seed)
         if len(queries) > num_queries:
@@ -223,7 +219,7 @@ class BenchmarkRunner:
         fts = SparseFTS5Retriever.load(fts_path)
         if fts is not None:
             self._sparse = fts
-            print(f"Sparse: FTS5 ({fts.count()} children, disk-backed)")
+            print(f"Sparse: FTS5 ({fts.count()} documents, disk-backed)")
         elif sparse_shards.exists() and list(sparse_shards.glob("shard_*.pkl")):
             self._sparse = SparseRetriever.load_sharded(str(sparse_shards))
             print(f"Sparse: sharded ({len(self._sparse.shards)} shards) [WARNING: high RAM]")
@@ -231,9 +227,9 @@ class BenchmarkRunner:
             self._sparse = SparseRetriever.load(str(sparse_index))
             n_children = len(self._sparse.chunk_store)
             db_total = self._db.count_children("chunk")
-            print(f"Sparse: single index ({n_children} children, DB has {db_total}) [WARNING: high RAM]")
+            print(f"Sparse: single index ({n_children} entries, DB has {db_total}) [WARNING: high RAM]")
             if n_children < 1000 and db_total > 1000:
-                print("  WARNING: sparse index has very few children vs DB. "
+                print("  WARNING: sparse index has very few entries vs DB. "
                       "Build sharded index for accurate benchmarks.")
         else:
             raise FileNotFoundError("No sparse index found")
@@ -576,55 +572,56 @@ class BenchmarkRunner:
     # --- batch-layer benchmarks ---
 
     def benchmark_chunking(self):
-        num_pages = self.config.get("query_source_pages", 500)
+        num_docs = self.config.get("query_source_pages", 500)
         temp_db = Path("data/benchmark_chunks.db")
-        print(f"\n--- Chunking Benchmark ({num_pages} pages) ---")
+        print(f"\n--- Chunking Benchmark ({num_docs} documents) ---")
         _cleanup_path(temp_db)
 
-        from datasets import load_dataset
+        from ingestion.file_readers import ParsedDocument
+        from chunking import HybridChunker
+
+        chunker = HybridChunker(
+            chunk_size=512, chunk_overlap=64,
+            split_on_paragraphs=True, use_semantic=False,
+        )
+
+        sample_text = (
+            "Ayurveda is a traditional system of medicine from India. "
+            "It is based on the concept of three doshas: Vata, Pitta, and Kapha. "
+            "Each dosha governs specific bodily functions and when imbalanced, causes disease. "
+            "Vata is composed of air and ether and governs movement and the nervous system. "
+            "Pitta is composed of fire and water and governs digestion and metabolism. "
+            "Kapha is composed of earth and water and governs structure and immunity. "
+            "Treatment involves diet, lifestyle changes, herbal remedies, and Panchakarma therapies. "
+        ) * 80
+
+        docs = [
+            ParsedDocument(
+                title=f"Benchmark Document {i+1}",
+                text=sample_text,
+                source_type="benchmark",
+            )
+            for i in range(num_docs)
+        ]
 
         tdb = ChunkStoreDB(str(temp_db))
-        ds = load_dataset(
-            "facebook/kilt_wikipedia", split="full",
-            streaming=True,
-        )
-
-        pages = []
-        total_paras = 0
-        for i, page in enumerate(ds):
-            if i >= num_pages:
-                break
-            pages.append(page)
-            total_paras += len(page["text"]["paragraph"])
-
-        def _bench_progress(event, *args):
-            if event == "page":
-                pg, _, _ = args
-                if pg % 100 == 0:
-                    print(f"  {pg}/{num_pages}", flush=True)
 
         t0 = time.perf_counter()
-        _, _, _, _ = process_pages(
-            pages, tdb,
-            workers=os.cpu_count(),
-            progress=_bench_progress,
-        )
+        chunker.chunk_documents(docs, tdb)
         tdb.commit()
         total_s = time.perf_counter() - t0
 
-        total_children = tdb.count_children("chunk")
-        total_sections = tdb.count_children("section")
+        total_chunks = tdb.count_children("chunk")
+        total_docs = tdb.count_children("document")
         tdb.close()
 
         self.results["chunking"] = {
             "total_time_s": round(total_s, 2),
-            "num_pages": num_pages,
-            "pages_per_sec": round(num_pages / total_s, 2) if total_s > 0 else 0,
-            "paragraphs_per_sec": round(total_paras / total_s, 1) if total_s > 0 else 0,
-            "total_paragraphs": total_paras,
-            "total_children": total_children,
-            "total_sections": total_sections,
-            "children_per_sec": round(total_children / total_s, 1) if total_s > 0 else 0,
+            "num_pages": num_docs,
+            "pages_per_sec": round(num_docs / total_s, 2) if total_s > 0 else 0,
+            "total_children": total_chunks,
+            "total_documents": total_docs,
+            "children_per_sec": round(total_chunks / total_s, 1) if total_s > 0 else 0,
         }
         self._print_batch("chunking")
 
@@ -727,11 +724,11 @@ class BenchmarkRunner:
             return
         print(f"  time: {r.get('total_time_s', '-')}s")
         if "pages_per_sec" in r:
-            print(f"  throughput: {r['pages_per_sec']} pages/s  "
-                  f"{r['paragraphs_per_sec']} paras/s  {r['children_per_sec']} children/s")
+            print(f"  throughput: {r['pages_per_sec']} docs/s  "
+                  f"{r['children_per_sec']} chunks/s")
         else:
-            print(f"  throughput: {r.get('children_per_sec', '-')} children/s  "
-                  f"({r.get('total_children', '-')} children total)")
+            print(f"  throughput: {r.get('children_per_sec', '-')} chunks/s  "
+                  f"({r.get('total_children', '-')} chunks total)")
 
     def run(self, queries):
         layers = self.config.get("layers", set())
@@ -803,9 +800,9 @@ class BenchmarkRunner:
                     print(f"{name:<25} SKIPPED: {r['error']}")
                     continue
                 if "pages_per_sec" in r:
-                    tp = f"{r['pages_per_sec']} pages/s  ({r['children_per_sec']} children/s)"
+                    tp = f"{r['pages_per_sec']} docs/s  ({r['children_per_sec']} chunks/s)"
                 else:
-                    tp = f"{r['children_per_sec']} children/s"
+                    tp = f"{r['children_per_sec']} chunks/s"
                 print(f"{name:<25} {r.get('total_time_s', 0):>10.2f}  {tp}")
 
         print("\n" + "=" * 95)

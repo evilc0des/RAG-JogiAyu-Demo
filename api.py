@@ -460,6 +460,21 @@ def _run_ingestion(connector) -> IngestionJobResponse:
         }
 
     def _run():
+        global _dense_retriever, _sparse_retriever
+
+        if _dense_retriever is not None:
+            try:
+                _dense_retriever.client.close()
+            except Exception:
+                pass
+            _dense_retriever = None
+        if _sparse_retriever is not None:
+            try:
+                _sparse_retriever.close()
+            except Exception:
+                pass
+            _sparse_retriever = None
+
         config = PipelineConfig(storage_dir="data", progress_callback=_progress_cb)
         pipeline = IngestionPipeline(config)
         job = pipeline.run(connector)
@@ -471,10 +486,10 @@ def _run_ingestion(connector) -> IngestionJobResponse:
             errors=list(map(str, job.errors)),
         ).model_dump()
 
-        global _doc_count_cache, _sparse_retriever, _dense_retriever
+        global _doc_count_cache
         _doc_count_cache = None
-        if job.status == "completed" and _sparse_retriever is None:
-            logger.info("First ingestion completed — loading indices for querying...")
+        if job.status == "completed":
+            logger.info("Ingestion completed — reloading indices for querying...")
             try:
                 _do_load()
             except Exception as e:
