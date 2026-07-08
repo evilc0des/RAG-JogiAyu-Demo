@@ -15,6 +15,7 @@ class PipelineConfig:
     use_llm_metadata: bool = False
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     storage_dir: str = "data"
+    progress_callback: callable = None
 
 
 class IngestionPipeline:
@@ -27,8 +28,11 @@ class IngestionPipeline:
 
         job_id = str(uuid.uuid4())
         job = IngestionJob(job_id=job_id, status="starting", message="Reading source files...")
+        cb = self.config.progress_callback
 
         documents = connector.ingest()
+        if cb:
+            cb(job)
         if hasattr(connector, "errors") and connector.errors:
             job.errors = connector.errors
             if not documents:
@@ -39,6 +43,8 @@ class IngestionPipeline:
         job.status = "chunking"
         job.message = f"Chunking {len(documents)} document(s)..."
         job.progress = 0.2
+        if cb:
+            cb(job)
 
         from chunking import HybridChunker
         chunker = HybridChunker(
@@ -72,6 +78,8 @@ class IngestionPipeline:
         job.status = "indexing"
         job.message = f"Building sparse and dense indexes for {chunk_count} chunks..."
         job.progress = 0.6
+        if cb:
+            cb(job)
 
         try:
             self._build_indexes(job)
@@ -91,6 +99,8 @@ class IngestionPipeline:
         from indexing import build_dense_index_from_db
         import os
 
+        cb = self.config.progress_callback
+
         storage = Path(self.config.storage_dir)
         db_path = str(storage / "chunks.db")
         fts_path = str(storage / "sparse_fts.db")
@@ -99,10 +109,16 @@ class IngestionPipeline:
         qdrant_api_key = os.environ.get("QDRANT_API_KEY") or None
 
         job.message = "Building FTS5 sparse index..."
+        job.progress = 0.65
+        if cb:
+            cb(job)
         fts = SparseFTS5Retriever(fts_path)
         fts.build_from_db(db_path)
         fts.close()
 
         job.message = "Building dense (Qdrant) index..."
+        job.progress = 0.8
+        if cb:
+            cb(job)
         build_dense_index_from_db(db_path, dense_path, batch_size=1000,
                                   qdrant_url=qdrant_url, qdrant_api_key=qdrant_api_key)

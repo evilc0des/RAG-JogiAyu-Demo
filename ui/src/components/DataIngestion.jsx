@@ -1,6 +1,53 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import api from '../api';
-import { Upload, FileText, Trash2, CheckCircle, XCircle, Loader2, Database } from 'lucide-react';
+import { Upload, FileText, Trash2, CheckCircle, XCircle, Loader2, Database, File, X, ArrowUp } from 'lucide-react';
+
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function FileBadge({ file, onRemove }) {
+  return (
+    <div className="flex items-center gap-2 bg-surface border border-border rounded-lg px-3 py-2 text-xs">
+      <File size={14} className="text-primary shrink-0" />
+      <span className="truncate flex-1">{file.name}</span>
+      <span className="text-textMuted shrink-0">{formatSize(file.size)}</span>
+      {onRemove && (
+        <button onClick={() => onRemove(file)} className="text-textMuted hover:text-red-400 transition-colors shrink-0">
+          <X size={14} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ProgressBar({ progress, message, status }) {
+  const pct = Math.round(progress * 100);
+  const isError = status === 'failed';
+  const isDone = status === 'completed';
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between text-xs">
+        <span className={`flex items-center gap-1.5 ${isDone ? 'text-green-400' : isError ? 'text-red-400' : 'text-text'}`}>
+          {isDone ? <CheckCircle size={12} /> : isError ? <XCircle size={12} /> : <Loader2 size={12} className="animate-spin" />}
+          {message}
+        </span>
+        <span className="text-textMuted tabular-nums">{pct}%</span>
+      </div>
+      <div className="w-full h-1.5 bg-surface rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all duration-500 ease-out ${
+            isError ? 'bg-red-500' : isDone ? 'bg-green-500' : 'bg-primary'
+          }`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
 
 export default function DataIngestion() {
   const [tab, setTab] = useState('upload');
@@ -8,29 +55,66 @@ export default function DataIngestion() {
   const [loading, setLoading] = useState(false);
   const [pasteText, setPasteText] = useState('');
   const [pasteTitle, setPasteTitle] = useState('');
+  const [selectedFiles, setSelectedFiles] = useState([]);
   const fileInputRef = useRef(null);
+
+  const handleFilesSelected = (e) => {
+    const files = Array.from(e.target.files || []);
+    setSelectedFiles(prev => [...prev, ...files]);
+    e.target.value = '';
+  };
+
+  const removeFile = (file) => {
+    setSelectedFiles(prev => prev.filter(f => f !== file));
+  };
+
+  const pollJobStatus = useCallback(async (jobId) => {
+    for (let i = 0; i < 120; i++) {
+      try {
+        const res = await api.get(`/api/ingest/status/${jobId}`);
+        const job = res.data;
+        setLoading(true);
+        setStatus({
+          type: job.status === 'completed' ? 'success' : job.status === 'failed' ? 'error' : 'progress',
+          jobId,
+          progress: job.progress || 0,
+          message: job.message || 'Processing...',
+          details: job,
+        });
+        if (job.status === 'completed' || job.status === 'failed' || job.status === 'partial') {
+          setLoading(false);
+          if (job.status === 'completed') setSelectedFiles([]);
+          return;
+        }
+      } catch (e) {
+        console.error('Poll error:', e);
+      }
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    setLoading(false);
+    setStatus({ type: 'error', message: 'Ingestion timed out' });
+  }, []);
 
   const handleFileUpload = async (e) => {
     e.preventDefault();
-    const files = fileInputRef.current?.files;
-    if (!files || files.length === 0) return;
+    if (selectedFiles.length === 0) return;
 
     setLoading(true);
     setStatus(null);
 
     try {
       const formData = new FormData();
-      for (const file of files) {
+      for (const file of selectedFiles) {
         formData.append('files', file);
       }
       const res = await api.post('/api/ingest/files', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
-      setStatus({ type: 'success', message: res.data.message, details: res.data });
+      pollJobStatus(res.data.job_id);
     } catch (err) {
       setStatus({ type: 'error', message: err.response?.data?.detail || err.message });
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const handlePasteText = async () => {
@@ -43,13 +127,13 @@ export default function DataIngestion() {
         text: pasteText,
         title: pasteTitle.trim() || 'Pasted Text',
       });
-      setStatus({ type: 'success', message: res.data.message, details: res.data });
       setPasteText('');
       setPasteTitle('');
+      pollJobStatus(res.data.job_id);
     } catch (err) {
       setStatus({ type: 'error', message: err.response?.data?.detail || err.message });
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const handleDeleteAll = async () => {
@@ -98,32 +182,51 @@ export default function DataIngestion() {
             <p className="text-xs text-textMuted">
               Upload files (.txt, .pdf, .json, .csv, .md) to ingest into the RAG system.
             </p>
-            <form onSubmit={handleFileUpload} className="space-y-2">
-              <div className="border-2 border-dashed border-border rounded-lg p-4 text-center hover:border-primary/50 transition-colors cursor-pointer"
-                   onClick={() => fileInputRef.current?.click()}>
-                <Upload size={20} className="mx-auto mb-1 text-textMuted" />
-                <p className="text-xs text-textMuted">Click to select files</p>
+
+            <div
+              className="border-2 border-dashed border-border rounded-lg p-5 text-center hover:border-primary/50 transition-colors cursor-pointer"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <ArrowUp size={22} className="mx-auto mb-1.5 text-textMuted" />
+              <p className="text-xs text-textMuted">Click to select files</p>
+              <p className="text-[10px] text-textMuted/60 mt-0.5">or drop files here</p>
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".txt,.pdf,.json,.csv,.md,.log"
+              onChange={handleFilesSelected}
+              className="hidden"
+            />
+
+            {selectedFiles.length > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-[10px] text-textMuted uppercase tracking-wider font-semibold">
+                  Selected Files ({selectedFiles.length})
+                </p>
+                {selectedFiles.map((file, i) => (
+                  <FileBadge key={`${file.name}-${i}`} file={file} onRemove={removeFile} />
+                ))}
               </div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                accept=".txt,.pdf,.json,.csv,.md,.log"
-                onChange={() => {}}
-                className="hidden"
-              />
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full bg-primary text-white py-2 rounded-lg text-sm font-medium hover:bg-primaryHover disabled:opacity-50 transition-colors"
-              >
-                {loading ? (
-                  <span className="flex items-center justify-center gap-2">
-                    <Loader2 size={14} className="animate-spin" /> Processing...
-                  </span>
-                ) : 'Upload & Ingest'}
-              </button>
-            </form>
+            )}
+
+            {status?.type === 'progress' && (
+              <ProgressBar progress={status.progress} message={status.message} status="in_progress" />
+            )}
+
+            <button
+              type="submit"
+              onClick={handleFileUpload}
+              disabled={loading || selectedFiles.length === 0}
+              className="w-full bg-primary text-white py-2 rounded-lg text-sm font-medium hover:bg-primaryHover disabled:opacity-50 transition-colors"
+            >
+              {loading ? (
+                <span className="flex items-center justify-center gap-2">
+                  <Loader2 size={14} className="animate-spin" /> Processing...
+                </span>
+              ) : 'Upload & Ingest'}
+            </button>
           </div>
         )}
 
@@ -138,6 +241,7 @@ export default function DataIngestion() {
               onChange={e => setPasteTitle(e.target.value)}
               placeholder="Title (optional)"
               className="w-full bg-surface border border-border rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-primary/50"
+              disabled={loading}
             />
             <textarea
               value={pasteText}
@@ -145,7 +249,13 @@ export default function DataIngestion() {
               placeholder="Paste text here..."
               rows={8}
               className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary/50 resize-none custom-scrollbar"
+              disabled={loading}
             />
+
+            {status?.type === 'progress' && (
+              <ProgressBar progress={status.progress} message={status.message} status="in_progress" />
+            )}
+
             <button
               onClick={handlePasteText}
               disabled={loading || !pasteText.trim()}
@@ -176,7 +286,7 @@ export default function DataIngestion() {
           </div>
         )}
 
-        {status && (
+        {status && status.type !== 'progress' && (
           <div className={`p-3 rounded-lg border text-xs ${
             status.type === 'success'
               ? 'bg-green-500/10 border-green-500/30 text-green-400'

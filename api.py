@@ -21,6 +21,7 @@ _active_jobs: dict[str, dict] = {}
 def _do_load():
     global _sparse_retriever, _dense_retriever, _db, _loading, _load_error
     _loading = True
+    _load_error = None
     try:
         from indexing import SparseRetriever, DenseRetriever
         from sparse_fts import SparseFTS5Retriever
@@ -44,6 +45,11 @@ def _do_load():
             logger.warning("No sparse index found. Server will start but /query will not work until data is ingested.")
             _sparse_retriever = None
             _dense_retriever = None
+            if _db is not None:
+                try:
+                    _db.close()
+                except Exception:
+                    pass
             _db = ChunkStoreDB("data/chunks.db")
             logger.info("Chunk store: initialized (empty)")
             _loading = False
@@ -433,31 +439,54 @@ def delete_all_documents():
 
 
 def _run_ingestion(connector) -> IngestionJobResponse:
+    import threading
     from ingestion.pipeline import IngestionPipeline, PipelineConfig
     import os
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
     job_id = str(uuid.uuid4())
-    _active_jobs[job_id] = {"job_id": job_id, "status": "starting", "message": "Starting ingestion...",
-                            "progress": 0.0, "errors": []}
+    _active_jobs[job_id] = {
+        "job_id": job_id, "status": "starting", "message": "Starting ingestion...",
+        "progress": 0.0, "errors": [],
+    }
 
-    config = PipelineConfig(storage_dir="data")
-    pipeline = IngestionPipeline(config)
+    def _progress_cb(job):
+        _active_jobs[job_id] = {
+            "job_id": job.job_id,
+            "status": job.status,
+            "message": job.message,
+            "progress": job.progress,
+            "errors": list(job.errors),
+        }
 
-    job = pipeline.run(connector)
-    resp = IngestionJobResponse(
-        job_id=job.job_id,
-        status=job.status,
-        message=job.message,
-        progress=job.progress,
-        errors=job.errors,
+    def _run():
+        config = PipelineConfig(storage_dir="data", progress_callback=_progress_cb)
+        pipeline = IngestionPipeline(config)
+        job = pipeline.run(connector)
+        _active_jobs[job_id] = IngestionJobResponse(
+            job_id=job.job_id,
+            status=job.status,
+            message=job.message,
+            progress=job.progress,
+            errors=list(map(str, job.errors)),
+        ).model_dump()
+
+        global _doc_count_cache, _sparse_retriever, _dense_retriever
+        _doc_count_cache = None
+        if job.status == "completed" and _sparse_retriever is None:
+            logger.info("First ingestion completed — loading indices for querying...")
+            try:
+                _do_load()
+            except Exception as e:
+                logger.warning("Could not load indices after ingestion: %s", e)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    return IngestionJobResponse(
+        job_id=job_id, status="started", message="Ingestion started",
+        progress=0.0, errors=[],
     )
-    _active_jobs[job_id] = resp.model_dump()
-
-    global _doc_count_cache
-    _doc_count_cache = None
-
-    return resp
 
 
 import os
