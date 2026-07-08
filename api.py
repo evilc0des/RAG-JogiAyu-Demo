@@ -41,7 +41,13 @@ def _do_load():
             _sparse_retriever = SparseRetriever.load(str(sparse_index_path))
             logger.info("Sparse: single legacy index loaded")
         else:
-            raise RuntimeError("No sparse index found. Run index_data.py or ingest data first.")
+            logger.warning("No sparse index found. Server will start but /query will not work until data is ingested.")
+            _sparse_retriever = None
+            _dense_retriever = None
+            _db = ChunkStoreDB("data/chunks.db")
+            logger.info("Chunk store: initialized (empty)")
+            _loading = False
+            return
 
         logger.info("Loading dense index (fastembed model + Qdrant)...")
         _dense_retriever = DenseRetriever.load()
@@ -147,10 +153,13 @@ class DocumentResponse(BaseModel):
 
 @app.get("/health")
 def health():
-    if _db is not None:
+    if _sparse_retriever is not None and _dense_retriever is not None:
         return {"status": "ok", "indices_loaded": True}
     if _loading:
         return {"status": "starting", "indices_loaded": False}
+    if _db is not None:
+        return {"status": "no_data", "indices_loaded": False,
+                "message": "No data indexed yet. Upload files or use the ingest API to add documents."}
     return {"status": "error", "indices_loaded": False, "error": _load_error}
 
 
