@@ -17,16 +17,7 @@ class Reranker:
     def __init__(self, model_name="cross-encoder/ms-marco-MiniLM-L-6-v2"):
         device = _get_device()
         self.model = CrossEncoder(model_name, device=device)
-        if device == "cpu":
-            try:
-                self.model.model = torch.quantization.quantize_dynamic(
-                    self.model.model, {torch.nn.Linear}, dtype=torch.qint8,
-                )
-                print(f"  Reranker loaded on {device} (quantized int8)")
-            except Exception:
-                print(f"  Reranker loaded on {device} (quantization failed, using fp32)")
-        else:
-            print(f"  Reranker loaded on {device}")
+        print(f"  Reranker loaded on {device}")
 
     def rerank(self, query, candidates, top_k=8):
         if not candidates:
