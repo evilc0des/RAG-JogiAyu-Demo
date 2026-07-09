@@ -5,6 +5,8 @@ import numpy as np
 import torch
 from sentence_transformers import CrossEncoder
 
+DEFAULT_MODEL = "cross-encoder/ms-marco-MiniLM-L-2-v2"
+
 
 def _get_device():
     if not torch.cuda.is_available():
@@ -22,49 +24,40 @@ def _get_onnx_path(model_name):
     return os.path.join(cache_dir, f"{safe}.onnx")
 
 
-def _export_cross_encoder_to_onnx(ce, onnx_path, device):
+def _export_cross_encoder(ce, onnx_path, device):
     tokenizer = ce.tokenizer
     config = ce.config
+    max_len = getattr(config, "max_length", 512)
 
-    sample_texts = ["sample query", "sample document text for tracing"]
-    features = tokenizer(
-        sample_texts,
-        padding=True,
-        truncation=True,
-        max_length=config.max_length if hasattr(config, "max_length") else 512,
-        return_tensors="pt",
-    )
+    texts = ["sample query text for ONNX export tracing", "sample document passage for export"]
+    features = tokenizer(texts, padding=True, truncation=True, max_length=max_len, return_tensors="pt")
     features = {k: v.to(device) for k, v in features.items()}
 
-    input_keys = ["input_ids", "attention_mask"]
-    if "token_type_ids" in features:
-        input_keys.append("token_type_ids")
-        token_type_ids_dummy = features["token_type_ids"]
-    else:
-        token_type_ids_dummy = None
+    has_token_type = "token_type_ids" in features
 
-    class ExportWrapper(torch.nn.Module):
-        def __init__(self, cross_encoder):
+    class Wrapper(torch.nn.Module):
+        def __init__(self, ce_model):
             super().__init__()
-            self.model = cross_encoder.model
-            self._ce = cross_encoder
+            self.transformer = ce_model.model
+            self._ce = ce_model
 
         def forward(self, input_ids, attention_mask, token_type_ids=None):
-            trans_kwargs = {"input_ids": input_ids, "attention_mask": attention_mask}
+            kwargs = {"input_ids": input_ids, "attention_mask": attention_mask}
             if token_type_ids is not None:
-                trans_kwargs["token_type_ids"] = token_type_ids
-            outputs = self.model(**trans_kwargs)
-            features = {"input_ids": input_ids, "attention_mask": attention_mask, "token_type_ids": token_type_ids}
-            embeddings = self._ce._pooling(outputs, features)
-            if hasattr(self._ce, "classifier") and self._ce.classifier is not None:
-                logits = self._ce.classifier(embeddings)
-            elif hasattr(self._ce, "config") and hasattr(self._ce.config, "num_labels"):
-                logits = torch.nn.functional.linear(embeddings, torch.eye(self._ce.config.num_labels, device=embeddings.device))
-            else:
-                logits = embeddings
-            return logits
+                kwargs["token_type_ids"] = token_type_ids
+            transformer_out = self.transformer(**kwargs)
+            fake_features = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "token_type_ids": token_type_ids,
+            }
+            embeddings = self._ce._pooling(transformer_out, fake_features)
+            classifier = getattr(self._ce, "classifier", None)
+            if classifier is not None:
+                return classifier(embeddings)
+            return embeddings
 
-    wrapper = ExportWrapper(ce)
+    wrapper = Wrapper(ce)
     wrapper.eval()
 
     dynamic_axes = {
@@ -72,13 +65,14 @@ def _export_cross_encoder_to_onnx(ce, onnx_path, device):
         "attention_mask": {0: "batch", 1: "seq_len"},
         "logits": {0: "batch"},
     }
-    input_tensors = (features["input_ids"], features["attention_mask"])
-    input_names = ["input_ids", "attention_mask"]
 
-    if "token_type_ids" in features:
+    if has_token_type:
         dynamic_axes["token_type_ids"] = {0: "batch", 1: "seq_len"}
         input_tensors = (features["input_ids"], features["attention_mask"], features["token_type_ids"])
         input_names = ["input_ids", "attention_mask", "token_type_ids"]
+    else:
+        input_tensors = (features["input_ids"], features["attention_mask"])
+        input_names = ["input_ids", "attention_mask"]
 
     torch.onnx.export(
         wrapper,
@@ -94,49 +88,62 @@ def _export_cross_encoder_to_onnx(ce, onnx_path, device):
 
 
 class Reranker:
-    def __init__(self, model_name="cross-encoder/ms-marco-MiniLM-L-6-v2"):
+    def __init__(self, model_name=None):
+        if model_name is None:
+            model_name = os.environ.get("RERANK_MODEL", DEFAULT_MODEL)
         device = _get_device()
         self.device = device
         self.model_name = model_name
 
         ce = CrossEncoder(model_name, device=device)
         self.tokenizer = ce.tokenizer
+        self._onnx_session = None
+        self.model = ce
+        self._backend = "pytorch"
 
         if device == "cpu":
             self._init_onnx(ce)
-        else:
-            self._onnx_session = None
-            self.model = ce
-            print(f"  Reranker loaded on {device}")
+
+        backend_tag = f" ({self._backend})" if device == "cpu" else ""
+        print(f"  Reranker loaded on {device}{backend_tag}")
 
     def _init_onnx(self, ce):
-        onnx_path = _get_onnx_path(self.model_name)
         try:
             import onnxruntime as ort
         except ImportError:
-            self._onnx_session = None
-            self.model = ce
-            print(f"  Reranker loaded on cpu (onnxruntime not available, using pytorch)")
+            print("  [reranker] onnxruntime not installed, using pytorch")
             return
 
+        onnx_path = _get_onnx_path(self.model_name)
+
         if not os.path.exists(onnx_path):
-            print(f"  Exporting ONNX model to {onnx_path} ...")
+            print(f"  [reranker] exporting ONNX model to {onnx_path} ...")
             try:
-                _export_cross_encoder_to_onnx(ce, onnx_path, self.device)
+                _export_cross_encoder(ce, onnx_path, self.device)
             except Exception as e:
-                print(f"  ONNX export failed ({e}), falling back to pytorch")
-                self._onnx_session = None
-                self.model = ce
+                print(f"  [reranker] ONNX export failed ({e}), using pytorch")
                 return
 
-        sess_opts = ort.SessionOptions()
-        sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        sess_opts.intra_op_num_threads = os.cpu_count() or 4
-        sess_opts.inter_op_num_threads = 1
+        try:
+            sess_opts = ort.SessionOptions()
+            sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            sess_opts.intra_op_num_threads = max(os.cpu_count() or 4, 1)
+            sess_opts.inter_op_num_threads = 1
+            self._onnx_session = ort.InferenceSession(
+                onnx_path, sess_opts, providers=["CPUExecutionProvider"],
+            )
+            self._backend = "onnx"
+        except Exception as e:
+            self._onnx_session = None
+            print(f"  [reranker] ONNX session failed ({e}), using pytorch")
 
-        self._onnx_session = ort.InferenceSession(onnx_path, sess_opts, providers=["CPUExecutionProvider"])
-        self.model = ce
-        print(f"  Reranker loaded on cpu (ONNX Runtime)")
+    def _tokenize(self, texts, docs):
+        config = self.model.config
+        max_len = getattr(config, "max_length", 512)
+        return self.tokenizer(
+            texts, docs,
+            padding=True, truncation=True, max_length=max_len, return_tensors="np",
+        )
 
     def _predict_pytorch(self, pairs):
         return self.model.predict(pairs, show_progress_bar=False, batch_size=128)
@@ -145,22 +152,25 @@ class Reranker:
         texts = [p[0] for p in pairs]
         docs = [p[1] for p in pairs]
 
-        tokenized = self.tokenizer(
-            texts, docs,
-            padding=True,
-            truncation=True,
-            max_length=getattr(self.model.config, "max_length", 512),
-            return_tensors="np",
-        )
+        batch_size = 128
+        all_scores = []
 
-        ort_inputs = {
-            "input_ids": tokenized["input_ids"],
-            "attention_mask": tokenized["attention_mask"],
-        }
-        if "token_type_ids" in tokenized:
-            ort_inputs["token_type_ids"] = tokenized["token_type_ids"]
+        for i in range(0, len(pairs), batch_size):
+            batch_texts = texts[i:i + batch_size]
+            batch_docs = docs[i:i + batch_size]
+            tokenized = self._tokenize(batch_texts, batch_docs)
 
-        logits = self._onnx_session.run(["logits"], ort_inputs)[0]
+            ort_inputs = {
+                "input_ids": tokenized["input_ids"],
+                "attention_mask": tokenized["attention_mask"],
+            }
+            if "token_type_ids" in tokenized:
+                ort_inputs["token_type_ids"] = tokenized["token_type_ids"]
+
+            logits = self._onnx_session.run(["logits"], ort_inputs)[0]
+            all_scores.append(logits)
+
+        logits = np.concatenate(all_scores, axis=0)
         return torch.sigmoid(torch.from_numpy(logits)).numpy().flatten()
 
     def _predict(self, pairs):
@@ -222,7 +232,6 @@ def assemble_neighbor_context(child_results, db, window_size=2, top_k=None):
 
     results = []
     seen_ids = set()
-
     children = child_results[:top_k] if top_k else child_results
 
     for child in children:
@@ -233,7 +242,6 @@ def assemble_neighbor_context(child_results, db, window_size=2, top_k=None):
 
         prev_chunks = _walk_prev(child, db, window_size)
         next_chunks = _walk_next(child, db, window_size)
-
         all_chunks = prev_chunks + [child] + next_chunks
         assembled_text = "\n\n".join(c["text"] for c in all_chunks)
 
