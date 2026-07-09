@@ -276,7 +276,7 @@ class BenchmarkRunner:
         for q in warmup_qs[:3]:
             hybrid_retrieve_with_rerank(
                 q["query"], self._sparse, self._dense, self._db,
-                fusion_top_k=50, rerank_top_k=8,
+                fusion_top_k=20, rerank_top_k=8,
                 sparse_k=50, dense_k=50,
             )
         print("  warmup complete.")
@@ -393,7 +393,7 @@ class BenchmarkRunner:
         for i, q in enumerate(queries):
             fr = hybrid_retrieve(
                 q["query"], self._sparse, self._dense, self._db,
-                top_k=50, sparse_k=50, dense_k=50, expand_to_section=False,
+                top_k=20, sparse_k=50, dense_k=50, expand_to_section=False,
             )
             qc_pairs.append((q["query"], fr["results"]))
             if (i + 1) % 10 == 0:
@@ -434,7 +434,7 @@ class BenchmarkRunner:
         for i, q in enumerate(queries):
             fr = hybrid_retrieve(
                 q["query"], self._sparse, self._dense, self._db,
-                top_k=50, sparse_k=50, dense_k=50, expand_to_section=False,
+                top_k=20, sparse_k=50, dense_k=50, expand_to_section=False,
             )
             qc_pairs.append((q["query"], fr["results"]))
             if (i + 1) % 20 == 0:
@@ -465,7 +465,7 @@ class BenchmarkRunner:
             t0 = time.perf_counter()
             result = hybrid_retrieve_with_rerank(
                 qt, self._sparse, self._dense, self._db,
-                fusion_top_k=50, rerank_top_k=8,
+                fusion_top_k=20, rerank_top_k=8,
                 sparse_k=50, dense_k=50,
             )
             timings.append((time.perf_counter() - t0) * 1000)

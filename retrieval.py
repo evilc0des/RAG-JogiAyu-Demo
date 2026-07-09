@@ -100,7 +100,7 @@ def hybrid_retrieve_with_rerank(
     sparse_retriever,
     dense_retriever,
     db,
-    fusion_top_k=50,
+    fusion_top_k=20,
     rerank_top_k=8,
     sparse_k=50,
     dense_k=50,
