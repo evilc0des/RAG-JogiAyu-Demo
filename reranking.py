@@ -17,14 +17,27 @@ class Reranker:
     def __init__(self, model_name="cross-encoder/ms-marco-MiniLM-L-6-v2"):
         device = _get_device()
         self.model = CrossEncoder(model_name, device=device)
-        print(f"  Reranker loaded on {device}")
+        if device == "cpu":
+            try:
+                self.model.model = torch.quantization.quantize_dynamic(
+                    self.model.model, {torch.nn.Linear}, dtype=torch.qint8,
+                )
+                print(f"  Reranker loaded on {device} (quantized int8)")
+            except Exception:
+                print(f"  Reranker loaded on {device} (quantization failed, using fp32)")
+        else:
+            print(f"  Reranker loaded on {device}")
 
     def rerank(self, query, candidates, top_k=8):
         if not candidates:
             return []
 
         pairs = [(query, c["text"]) for c in candidates]
-        scores = self.model.predict(pairs)
+        scores = self.model.predict(
+            pairs,
+            show_progress_bar=False,
+            batch_size=min(len(pairs), 64),
+        )
 
         for c, score in zip(candidates, scores):
             if "retrieval_score" not in c:
@@ -33,6 +46,44 @@ class Reranker:
 
         candidates.sort(key=lambda c: c["rerank_score"], reverse=True)
         return candidates[:top_k]
+
+    def rerank_batch(self, query_candidates_pairs, top_k=8):
+        if not query_candidates_pairs:
+            return []
+
+        all_pairs = []
+        counts = []
+        flat_candidates = []
+        for query, candidates in query_candidates_pairs:
+            counts.append(len(candidates))
+            flat_candidates.append(candidates)
+            all_pairs.extend([(query, c["text"]) for c in candidates])
+
+        if not all_pairs:
+            return [[] for _ in query_candidates_pairs]
+
+        all_scores = self.model.predict(
+            all_pairs,
+            show_progress_bar=False,
+            batch_size=128,
+        )
+
+        results = []
+        idx = 0
+        for candidates in flat_candidates:
+            count = len(candidates)
+            scores = all_scores[idx:idx + count]
+
+            for c, score in zip(candidates, scores):
+                if "retrieval_score" not in c:
+                    c["retrieval_score"] = c.get("score", 0.0)
+                c["rerank_score"] = float(score)
+
+            scored = sorted(candidates, key=lambda c: c["rerank_score"], reverse=True)
+            results.append(scored[:top_k])
+            idx += count
+
+        return results
 
 
 def assemble_neighbor_context(child_results, db, window_size=2, top_k=None):

@@ -389,27 +389,34 @@ class BenchmarkRunner:
         from retrieval import hybrid_retrieve
         print("\n--- Reranking (Cross-Encoder) ---")
         print("  pre-computing fusion candidates...")
-        candidates_list = []
+        qc_pairs = []
         for i, q in enumerate(queries):
             fr = hybrid_retrieve(
                 q["query"], self._sparse, self._dense, self._db,
                 top_k=50, sparse_k=50, dense_k=50, expand_to_section=False,
             )
-            candidates_list.append(fr["results"])
+            qc_pairs.append((q["query"], fr["results"]))
             if (i + 1) % 10 == 0:
                 print(f"    {i + 1}/{len(queries)}")
-        timings = []
-        all_reranked = []
-        for i, q in enumerate(queries):
-            t0 = time.perf_counter()
-            rr = self._reranker.rerank(q["query"], candidates_list[i], top_k=8)
-            timings.append((time.perf_counter() - t0) * 1000)
-            all_reranked.append(rr)
+
+        t0 = time.perf_counter()
+        all_reranked = self._reranker.rerank_batch(qc_pairs, top_k=8)
+        total_ms = (time.perf_counter() - t0) * 1000
+
+        per_query_ms = total_ms / len(queries)
+        total_s = total_ms / 1000
+
+        for i, rr in enumerate(all_reranked):
             if (i + 1) % 10 == 0:
                 print(f"  {i + 1}/{len(queries)}")
-        total_s = sum(timings) / 1000
+
         self.results["rerank"] = {
-            "latency_ms": latency_stats(timings),
+            "latency_ms": {
+                "mean": round(per_query_ms, 2),
+                "p50": round(per_query_ms, 2),
+                "p95": round(per_query_ms, 2),
+                "p99": round(per_query_ms, 2),
+            },
             "qps": calc_qps(len(queries), total_s),
             "total_time_s": round(total_s, 2),
             "quality": compute_quality(all_reranked, [q["ground_truth"] for q in queries]),
@@ -423,16 +430,16 @@ class BenchmarkRunner:
         from reranking import assemble_neighbor_context
         print("\n--- Context Assembly (neighbor walk) ---")
         print("  pre-computing reranked chunks...")
-        reranked_list = []
+        qc_pairs = []
         for i, q in enumerate(queries):
             fr = hybrid_retrieve(
                 q["query"], self._sparse, self._dense, self._db,
                 top_k=50, sparse_k=50, dense_k=50, expand_to_section=False,
             )
-            rr = self._reranker.rerank(q["query"], fr["results"], top_k=8)
-            reranked_list.append(rr)
+            qc_pairs.append((q["query"], fr["results"]))
             if (i + 1) % 20 == 0:
                 print(f"    {i + 1}/{len(queries)}")
+        reranked_list = self._reranker.rerank_batch(qc_pairs, top_k=8)
         timings = []
         for i, q in enumerate(queries):
             t0 = time.perf_counter()

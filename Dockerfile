@@ -14,7 +14,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONPATH=/app \
     QDRANT_URL= \
     OPENAI_BASE_URL=https://inference.do-ai.run/v1 \
-    TOKENIZERS_PARALLELISM=false
+    TOKENIZERS_PARALLELISM=true
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
