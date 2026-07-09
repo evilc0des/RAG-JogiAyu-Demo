@@ -870,7 +870,7 @@ def main():
 
     all_layers = {
         "sparse", "dense", "rrf", "rerank", "section_assembly",
-        "combined", "generation", "generation_standalone",
+        "generation", "generation_standalone",
         "chunking", "sparse_indexing", "dense_indexing",
     }
     if args.layers == "all":
