@@ -35,47 +35,26 @@ def _export_cross_encoder(ce, onnx_path, device):
 
     has_token_type = "token_type_ids" in features
 
-    class Wrapper(torch.nn.Module):
-        def __init__(self, ce_model):
-            super().__init__()
-            self.transformer = ce_model.model
-            self._ce = ce_model
-
-        def forward(self, input_ids, attention_mask, token_type_ids=None):
-            kwargs = {"input_ids": input_ids, "attention_mask": attention_mask}
-            if token_type_ids is not None:
-                kwargs["token_type_ids"] = token_type_ids
-            transformer_out = self.transformer(**kwargs)
-            fake_features = {
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "token_type_ids": token_type_ids,
-            }
-            embeddings = self._ce._pooling(transformer_out, fake_features)
-            classifier = getattr(self._ce, "classifier", None)
-            if classifier is not None:
-                return classifier(embeddings)
-            return embeddings
-
-    wrapper = Wrapper(ce)
-    wrapper.eval()
-
-    dynamic_axes = {
-        "input_ids": {0: "batch", 1: "seq_len"},
-        "attention_mask": {0: "batch", 1: "seq_len"},
-        "logits": {0: "batch"},
-    }
+    hf_model = ce.model
+    hf_model.eval()
 
     if has_token_type:
-        dynamic_axes["token_type_ids"] = {0: "batch", 1: "seq_len"}
         input_tensors = (features["input_ids"], features["attention_mask"], features["token_type_ids"])
         input_names = ["input_ids", "attention_mask", "token_type_ids"]
     else:
         input_tensors = (features["input_ids"], features["attention_mask"])
         input_names = ["input_ids", "attention_mask"]
 
+    dynamic_axes = {
+        "input_ids": {0: "batch", 1: "seq_len"},
+        "attention_mask": {0: "batch", 1: "seq_len"},
+        "logits": {0: "batch"},
+    }
+    if has_token_type:
+        dynamic_axes["token_type_ids"] = {0: "batch", 1: "seq_len"}
+
     torch.onnx.export(
-        wrapper,
+        hf_model,
         input_tensors,
         onnx_path,
         input_names=input_names,
@@ -84,7 +63,8 @@ def _export_cross_encoder(ce, onnx_path, device):
         opset_version=14,
         do_constant_folding=True,
     )
-    wrapper._ce = None
+
+    hf_model.train()
 
 
 class Reranker:
@@ -115,6 +95,9 @@ class Reranker:
             return
 
         onnx_path = _get_onnx_path(self.model_name)
+
+        if os.path.exists(onnx_path) and os.path.getsize(onnx_path) < 1024:
+            os.remove(onnx_path)
 
         if not os.path.exists(onnx_path):
             print(f"  [reranker] exporting ONNX model to {onnx_path} ...")
