@@ -35,6 +35,7 @@ class AnswerGenerator:
         self.api_key = config.get("api_key") or os.environ.get("OPENAI_API_KEY")
         self.api_base = config.get("api_base") or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1"
         self.extra_headers = config.get("headers") or {}
+        print(f"  Generator loaded: model={self.model} base={self.api_base}", flush=True)
 
     def _call_llm(self, messages):
         url = f"{self.api_base.rstrip('/')}/chat/completions"
@@ -47,11 +48,13 @@ class AnswerGenerator:
             "model": self.model,
             "messages": messages,
             "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
+            "max_completion_tokens": self.max_tokens,
         }
 
         resp = requests.post(url, headers=headers, json=body, timeout=120)
-        resp.raise_for_status()
+        if not resp.ok:
+            detail = resp.text[:500]
+            raise RuntimeError(f"LLM call failed ({resp.status_code}): {detail}")
         data = resp.json()
         content = data["choices"][0]["message"].get("content")
         reasoning = data["choices"][0]["message"].get("reasoning_content")
