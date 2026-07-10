@@ -1,11 +1,12 @@
 import json
+import os
 import re
 
 
 class MultiHopOrchestrator:
     def __init__(self, config=None):
         config = config or {}
-        self.model = config.get("model", "gemma-4-31B-it")
+        self.model = config.get("model") or os.environ.get("LLM_MODEL") or "gemma-4-31B-it"
         self.temperature = config.get("temperature", 0.0)
         self.max_hops = config.get("max_hops", 3)
         self.max_sub_queries_per_hop = config.get("max_sub_queries_per_hop", 3)

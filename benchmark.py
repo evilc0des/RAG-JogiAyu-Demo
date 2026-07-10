@@ -250,7 +250,7 @@ class BenchmarkRunner:
         if self._generator is None:
             from generation import AnswerGenerator
             self._generator = AnswerGenerator({
-                "model": self.config.get("gen_model", "gemma-4-31B-it"),
+                "model": self.config.get("gen_model"),
                 "temperature": self.config.get("gen_temperature", 0.2),
             })
 

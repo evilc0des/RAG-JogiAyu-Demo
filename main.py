@@ -53,7 +53,7 @@ for i, r in enumerate(result["results"]):
 print("\n=== Generated Answer ===")
 
 context_blocks = build_context_blocks(result["results"])
-generator = AnswerGenerator({"model": "gemma-4-31B-it", "temperature": 0.2})
+generator = AnswerGenerator({"temperature": 0.2})
 answer = generator.generate(result["query"], context_blocks)
 
 print(f"Grounded:  {answer['grounded']}")

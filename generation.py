@@ -29,7 +29,7 @@ def _split_sentences(text):
 class AnswerGenerator:
     def __init__(self, config=None):
         config = config or {}
-        self.model = config.get("model", "gemma-4-31B-it")
+        self.model = config.get("model") or os.environ.get("LLM_MODEL") or "gemma-4-31B-it"
         self.temperature = config.get("temperature", 0.0)
         self.max_tokens = config.get("max_tokens", 1024)
         self.api_key = config.get("api_key") or os.environ.get("OPENAI_API_KEY")
