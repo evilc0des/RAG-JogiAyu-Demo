@@ -851,7 +851,7 @@ def main():
     parser.add_argument("--dense-batch-size", type=int, default=1000)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--gen-queries", type=int, default=50)
-    parser.add_argument("--gen-model", default="gemma-4-31B-it")
+    parser.add_argument("--gen-model", default=None)
     parser.add_argument("--gen-temperature", type=float, default=0.2)
     parser.add_argument("--output", default=None)
     parser.add_argument("--query-cache", default="data/benchmark_queries.json")
