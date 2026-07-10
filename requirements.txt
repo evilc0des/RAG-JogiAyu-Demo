@@ -8,5 +8,4 @@ fastapi
 uvicorn
 python-multipart
 onnxruntime
-onnxscript
 pypdf
