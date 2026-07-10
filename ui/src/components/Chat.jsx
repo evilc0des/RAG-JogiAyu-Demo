@@ -106,7 +106,7 @@ export default function Chat({ onSelectChunk }) {
                     : 'glass rounded-tl-sm'
               }`}>
                 {/* Meta info for assistant */}
-                {msg.role === 'assistant' && !msg.error && (msg.abstained || !msg.grounded) && (
+                {msg.role === 'assistant' && !msg.error && (msg.abstained) && (
                   <div className="flex items-center gap-2 mb-3 text-xs px-2 py-1.5 rounded-md bg-red-500/10 text-red-400 border border-red-500/20">
                     <AlertCircle size={14} />
                     <span>
