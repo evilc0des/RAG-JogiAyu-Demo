@@ -29,7 +29,12 @@ def _export_cross_encoder(ce, onnx_path, device):
     config = ce.config
     max_len = getattr(config, "max_length", 512)
 
-    texts = ["sample query text for ONNX export tracing", "sample document passage for export"]
+    texts = [
+        "sample query text for ONNX export tracing with more realistic length",
+        "This is a longer sample document passage that better represents actual content "
+        "that would be processed during reranking. It includes multiple sentences to "
+        "ensure the traced model handles variable sequence lengths correctly.",
+    ]
     features = tokenizer(texts, padding=True, truncation=True, max_length=max_len, return_tensors="pt")
     features = {k: v.to(device) for k, v in features.items()}
 
@@ -62,6 +67,7 @@ def _export_cross_encoder(ce, onnx_path, device):
         dynamic_axes=dynamic_axes,
         opset_version=14,
         do_constant_folding=True,
+        dynamo=False,
     )
 
     hf_model.train()
@@ -132,13 +138,17 @@ class Reranker:
         return self.model.predict(pairs, show_progress_bar=False, batch_size=128)
 
     def _predict_onnx(self, pairs):
+        import sys
         texts = [p[0] for p in pairs]
         docs = [p[1] for p in pairs]
 
-        batch_size = 128
+        batch_size = 64
         all_scores = []
 
+        print(f"  [reranker] ONNX inference starting: {len(pairs)} pairs in { (len(pairs) + batch_size - 1) // batch_size } batches", flush=True)
+
         for i in range(0, len(pairs), batch_size):
+            print(f"  [reranker]   batch {i // batch_size + 1}...", end="", flush=True)
             batch_texts = texts[i:i + batch_size]
             batch_docs = docs[i:i + batch_size]
             tokenized = self._tokenize(batch_texts, batch_docs)
@@ -152,13 +162,24 @@ class Reranker:
 
             logits = self._onnx_session.run(["logits"], ort_inputs)[0]
             all_scores.append(logits)
+            print(" ok", flush=True)
 
+        print(f"  [reranker] concatenating {len(all_scores)} score arrays...", end="", flush=True)
         logits = np.concatenate(all_scores, axis=0)
-        return torch.sigmoid(torch.from_numpy(logits)).numpy().flatten()
+        print(" ok", flush=True)
+        result = torch.sigmoid(torch.from_numpy(logits)).numpy().flatten()
+        print(f"  [reranker] ONNX inference complete: {len(result)} scores", flush=True)
+        return result
 
     def _predict(self, pairs):
         if self._onnx_session is not None:
-            return self._predict_onnx(pairs)
+            print(f"  [reranker] using ONNX backend for {len(pairs)} pairs", flush=True)
+            try:
+                return self._predict_onnx(pairs)
+            except Exception as e:
+                print(f"  [reranker] ONNX inference failed ({e}), falling back to pytorch", flush=True)
+                self._onnx_session = None
+                self._backend = "pytorch"
         return self._predict_pytorch(pairs)
 
     def rerank(self, query, candidates, top_k=8):
@@ -177,19 +198,24 @@ class Reranker:
         return candidates[:top_k]
 
     def rerank_batch(self, query_candidates_pairs, top_k=8):
+        import sys
         if not query_candidates_pairs:
             return []
 
+        print(f"  [reranker] rerank_batch: building pairs from {len(query_candidates_pairs)} queries...", end="", flush=True)
         all_pairs = []
         flat_candidates = []
         for query, candidates in query_candidates_pairs:
             flat_candidates.append(candidates)
             all_pairs.extend([(query, c["text"]) for c in candidates])
+        print(f" {len(all_pairs)} pairs", flush=True)
 
         if not all_pairs:
             return [[] for _ in query_candidates_pairs]
 
         all_scores = self._predict(all_pairs)
+
+        print(f"  [reranker] sorting and collecting top-{top_k} per query...", end="", flush=True)
 
         results = []
         idx = 0
@@ -206,6 +232,7 @@ class Reranker:
             results.append(scored[:top_k])
             idx += count
 
+        print(" ok", flush=True)
         return results
 
 
