@@ -25,7 +25,6 @@ def _get_onnx_path(model_name):
 
 
 def _export_cross_encoder(ce, onnx_path, device):
-    tokenizer = ce.tokenizer
     config = ce.config
     max_len = getattr(config, "max_length", 512)
 
@@ -35,7 +34,9 @@ def _export_cross_encoder(ce, onnx_path, device):
         "that would be processed during reranking. It includes multiple sentences to "
         "ensure the traced model handles variable sequence lengths correctly.",
     ]
-    features = tokenizer(texts, padding=True, truncation=True, max_length=max_len, return_tensors="pt")
+    features = ce.tokenizer(
+        texts, padding="max_length", truncation=True, max_length=max_len, return_tensors="pt",
+    )
     features = {k: v.to(device) for k, v in features.items()}
 
     has_token_type = "token_type_ids" in features
@@ -51,12 +52,12 @@ def _export_cross_encoder(ce, onnx_path, device):
         input_names = ["input_ids", "attention_mask"]
 
     dynamic_axes = {
-        "input_ids": {0: "batch", 1: "seq_len"},
-        "attention_mask": {0: "batch", 1: "seq_len"},
+        "input_ids": {0: "batch"},
+        "attention_mask": {0: "batch"},
         "logits": {0: "batch"},
     }
     if has_token_type:
-        dynamic_axes["token_type_ids"] = {0: "batch", 1: "seq_len"}
+        dynamic_axes["token_type_ids"] = {0: "batch"}
 
     torch.onnx.export(
         hf_model,
@@ -71,6 +72,7 @@ def _export_cross_encoder(ce, onnx_path, device):
     )
 
     hf_model.train()
+    return max_len
 
 
 class Reranker:
@@ -84,6 +86,7 @@ class Reranker:
         ce = CrossEncoder(model_name, device=device)
         self.tokenizer = ce.tokenizer
         self._onnx_session = None
+        self._onnx_max_len = None
         self.model = ce
         self._backend = "pytorch"
 
@@ -108,7 +111,7 @@ class Reranker:
         if not os.path.exists(onnx_path):
             print(f"  [reranker] exporting ONNX model to {onnx_path} ...")
             try:
-                _export_cross_encoder(ce, onnx_path, self.device)
+                self._onnx_max_len = _export_cross_encoder(ce, onnx_path, self.device)
             except Exception as e:
                 print(f"  [reranker] ONNX export failed ({e}), using pytorch")
                 return
@@ -127,11 +130,11 @@ class Reranker:
             print(f"  [reranker] ONNX session failed ({e}), using pytorch")
 
     def _tokenize(self, texts, docs):
-        config = self.model.config
-        max_len = getattr(config, "max_length", 512)
+        max_len = self._onnx_max_len if self._onnx_session is not None else getattr(self.model.config, "max_length", 512)
+        padding = "max_length" if self._onnx_session is not None else True
         return self.tokenizer(
             texts, docs,
-            padding=True, truncation=True, max_length=max_len, return_tensors="np",
+            padding=padding, truncation=True, max_length=max_len, return_tensors="np",
         )
 
     def _predict_pytorch(self, pairs):
